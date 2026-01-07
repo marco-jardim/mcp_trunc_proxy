@@ -64,11 +64,16 @@ function parseArgs(argv) {
   return args;
 }
 
+// ISSUE-032 FIX: Add warning for invalid env var values
 function envInt(name, fallback) {
   const v = process.env[name];
   if (v == null) return fallback;
   const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isFinite(n)) {
+    process.stderr.write(`[mcp-trunc-proxy] warn: invalid ${name}="${v}", using default ${fallback}\n`);
+    return fallback;
+  }
+  return n;
 }
 
 function usage() {
@@ -87,7 +92,7 @@ Options:
   --preview-max-chars <n>   Max chars in preview returned to LLM (default 6000)
   --head-lines <n>          Preview head lines (default 60)
   --tail-lines <n>          Preview tail lines (default 60)
-  --error-pattern <regex>   Custom regex for error extraction (default: error|fail|exception|...)
+
   --store <spec>            memory (default) | file:<dir> | redis:<url>
   --ttl-seconds <n>         TTL seconds (default 604800; best-effort for memory/file)
   --max-artifacts <n>       In-memory cap (default 2000)
@@ -144,7 +149,22 @@ async function main() {
   await runProxy(args);
 }
 
-main().catch((e) => {
+// ISSUE-038 FIX: Track store for cleanup on uncaught error
+let activeStore = null;
+
+export function setActiveStore(store) {
+  activeStore = store;
+}
+
+main().catch(async (e) => {
   process.stderr.write(`[mcp-trunc-proxy] fatal: ${e?.stack ?? e}\n`);
+  // Attempt cleanup if store was created
+  if (activeStore) {
+    try {
+      await activeStore.close();
+    } catch {
+      // Ignore cleanup errors during fatal exit
+    }
+  }
   process.exit(1);
 });

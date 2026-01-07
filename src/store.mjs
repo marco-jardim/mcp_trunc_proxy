@@ -2,12 +2,36 @@
 import { mkdir, readFile, writeFile, readdir, unlink, rename } from "node:fs/promises";
 import { join } from "node:path";
 
+/**
+ * Create a store instance based on spec.
+ * @param {object} options
+ * @param {string} [options.spec] - Store type: "memory", "file:<dir>", or "redis:<url>"
+ * @param {number} [options.ttlSeconds] - TTL for artifacts
+ * @param {number} [options.maxArtifacts] - Max artifacts (memory store only)
+ * @param {string} [options.keyPrefix] - Redis key prefix
+ * @param {object} [options.log] - Logger instance
+ * @returns {Promise<Store>}
+ */
 export async function createStore({ spec, ttlSeconds, maxArtifacts, keyPrefix, log }) {
   if (!spec || spec === "memory") return createMemoryStore({ ttlSeconds, maxArtifacts, log });
   if (spec.startsWith("file:")) return await createFileStore({ dir: spec.slice("file:".length), ttlSeconds, log });
   if (spec.startsWith("redis:")) return await createRedisStore({ url: spec.slice("redis:".length), ttlSeconds, keyPrefix, log });
 
   throw new Error(`Unknown store spec: ${spec} (expected memory, file:<dir>, redis:<url>)`);
+}
+
+// ISSUE-029 FIX: Safe base64 decoding with validation
+function decodeBase64Safe(b64, log, context) {
+  if (typeof b64 !== "string" || !b64) {
+    log?.error?.(`Invalid base64 data in ${context}: expected string, got ${typeof b64}`);
+    return null;
+  }
+  try {
+    return Buffer.from(b64, "base64");
+  } catch (err) {
+    log?.error?.(`Failed to decode base64 in ${context}: ${err.message}`);
+    return null;
+  }
 }
 
 // ISSUE-021 FIX: Add default maxArtifacts
@@ -34,6 +58,13 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
   interval.unref?.();
 
   return {
+    /**
+     * Store an artifact.
+     * @param {string} id - Artifact ID
+     * @param {Buffer} data - Artifact data
+     * @param {object} meta - Metadata
+     * @returns {Promise<void>}
+     */
     async put(id, data, meta) {
       const now = Date.now();
       map.set(id, {
@@ -45,6 +76,12 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
       });
       sweep();
     },
+
+    /**
+     * Retrieve an artifact.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, data: Buffer, meta: object}|null>} - Artifact or null if not found/expired
+     */
     async get(id) {
       const rec = map.get(id);
       if (!rec) return null;
@@ -55,9 +92,20 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
       rec.lastAccess = Date.now();
       return { id, data: rec.data, meta: rec.meta };
     },
+
+    /**
+     * Get artifact metadata.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, store: string, meta: object, createdAt: string, lastAccess: string, expiresAt: string|null, bytesStored: number|null}|null>}
+     */
     async info(id) {
       const rec = map.get(id);
       if (!rec) return null;
+      // ISSUE-034 FIX: Add expiry check consistent with get()
+      if (rec.expiresAt && rec.expiresAt <= Date.now()) {
+        map.delete(id);
+        return null;
+      }
       return {
         id,
         store: "memory",
@@ -68,6 +116,11 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
         bytesStored: rec.data?.byteLength ?? null,
       };
     },
+
+    /**
+     * Close the store and release resources.
+     * @returns {Promise<void>}
+     */
     async close() {
       clearInterval(interval);
     },
@@ -82,6 +135,24 @@ async function createFileStore({ dir, ttlSeconds, log }) {
   function pathFor(id) {
     const safeId = String(id).replace(/[^a-zA-Z0-9_-]/g, "_");
     return join(baseDir, `${safeId}.json`);
+  }
+
+  // ISSUE-035 FIX: Extract shared file reading logic
+  async function readArtifactFile(id) {
+    const filePath = pathFor(id);
+    try {
+      const raw = await readFile(filePath, "utf8");
+      try {
+        return { rec: JSON.parse(raw), filePath };
+      } catch (parseErr) {
+        log?.error?.(`Corrupt artifact file ${id}: ${parseErr.message}`);
+        return { rec: null, filePath };
+      }
+    } catch (err) {
+      if (err.code === "ENOENT") return { rec: null, filePath };
+      log?.error?.(`Error reading artifact file ${id}: ${err.message}`);
+      return { rec: null, filePath };
+    }
   }
 
   // ISSUE-011 FIX: Proactive cleanup interval for expired files
@@ -112,8 +183,13 @@ async function createFileStore({ dir, ttlSeconds, log }) {
   cleanupInterval.unref?.();
 
   return {
-    // ISSUE-002 FIX: All async I/O
-    // ISSUE-007 FIX: Atomic write with temp file + rename
+    /**
+     * Store an artifact.
+     * @param {string} id - Artifact ID
+     * @param {Buffer} data - Artifact data
+     * @param {object} meta - Metadata
+     * @returns {Promise<void>}
+     */
     async put(id, data, meta) {
       const rec = {
         id,
@@ -133,59 +209,54 @@ async function createFileStore({ dir, ttlSeconds, log }) {
         throw err; // Re-throw to signal failure
       }
     },
-    // ISSUE-002 FIX: Async I/O
-    // ISSUE-012 FIX: JSON.parse wrapped in try-catch
+
+    /**
+     * Retrieve an artifact.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, data: Buffer, meta: object}|null>} - Artifact or null if not found/expired
+     */
     async get(id) {
-      const p = pathFor(id);
-      try {
-        const raw = await readFile(p, "utf8");
-        let rec;
-        try {
-          rec = JSON.parse(raw);
-        } catch (parseErr) {
-          // ISSUE-012 FIX: Corrupt file - log and return null
-          log?.error?.(`Corrupt artifact file ${id}: ${parseErr.message}`);
-          return null;
-        }
-        if (rec.expiresAt && Date.parse(rec.expiresAt) <= Date.now()) {
-          // best-effort cleanup
-          await unlink(p).catch(() => {});
-          return null;
-        }
-        return { id, data: Buffer.from(rec.dataB64, "base64"), meta: rec.meta };
-      } catch (err) {
-        if (err.code === "ENOENT") return null; // File not found
-        log?.error?.(`Error reading artifact file ${id}: ${err.message}`);
+      const { rec, filePath } = await readArtifactFile(id);
+      if (!rec) return null;
+      if (rec.expiresAt && Date.parse(rec.expiresAt) <= Date.now()) {
+        await unlink(filePath).catch(() => {});
         return null;
       }
+      // ISSUE-029 FIX: Validate base64 data
+      const data = decodeBase64Safe(rec.dataB64, log, `FileStore artifact ${id}`);
+      if (!data) return null;
+      return { id, data, meta: rec.meta };
     },
-    // ISSUE-002 FIX: Async I/O
-    // ISSUE-012 FIX: JSON.parse wrapped in try-catch
+
+    /**
+     * Get artifact metadata.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, store: string, createdAt: string, expiresAt: string|null, meta: object, bytesStored: number|null}|null>}
+     */
     async info(id) {
-      const p = pathFor(id);
-      try {
-        const raw = await readFile(p, "utf8");
-        let rec;
-        try {
-          rec = JSON.parse(raw);
-        } catch (parseErr) {
-          log?.error?.(`Corrupt artifact file ${id}: ${parseErr.message}`);
-          return null;
-        }
-        return {
-          id,
-          store: `file:${baseDir}`,
-          createdAt: rec.createdAt,
-          expiresAt: rec.expiresAt ?? null,
-          meta: rec.meta,
-          bytesStored: rec.dataB64 ? Buffer.from(rec.dataB64, "base64").byteLength : null,
-        };
-      } catch (err) {
-        if (err.code === "ENOENT") return null;
-        log?.error?.(`Error reading artifact file ${id}: ${err.message}`);
+      const { rec } = await readArtifactFile(id);
+      if (!rec) return null;
+      // ISSUE-034 FIX: Add expiry check consistent with get()
+      if (rec.expiresAt && Date.parse(rec.expiresAt) <= Date.now()) {
+        await unlink(pathFor(id)).catch(() => {});
         return null;
       }
+      // ISSUE-029 FIX: Validate base64 for byte count
+      const data = decodeBase64Safe(rec.dataB64, log, `FileStore artifact ${id}`);
+      return {
+        id,
+        store: `file:${baseDir}`,
+        createdAt: rec.createdAt,
+        expiresAt: rec.expiresAt ?? null,
+        meta: rec.meta,
+        bytesStored: data ? data.byteLength : null,
+      };
     },
+
+    /**
+     * Close the store and release resources.
+     * @returns {Promise<void>}
+     */
     async close() {
       clearInterval(cleanupInterval);
     },
@@ -201,8 +272,23 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
   }
   const { createClient } = redisMod;
 
-  const client = createClient({ url });
+  // ISSUE-030 FIX: Add reconnection strategy
+  const client = createClient({
+    url,
+    socket: {
+      reconnectStrategy: (retries) => {
+        if (retries > 10) {
+          log?.error?.("redis reconnect failed after 10 attempts");
+          return new Error("Redis reconnect exhausted");
+        }
+        const delay = Math.min(retries * 100, 3000); // Exponential backoff, max 3s
+        log?.warn?.(`redis reconnecting in ${delay}ms (attempt ${retries + 1}/10)`);
+        return delay;
+      }
+    }
+  });
   client.on("error", (err) => log?.error?.(`redis error: ${err?.message ?? err}`));
+  client.on("reconnecting", () => log?.info?.("redis reconnecting..."));
   await client.connect();
 
   const prefix = keyPrefix || "mcp-trunc-proxy";
@@ -225,6 +311,13 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
   }
 
   return {
+    /**
+     * Store an artifact.
+     * @param {string} id - Artifact ID
+     * @param {Buffer} data - Artifact data
+     * @param {object} meta - Metadata
+     * @returns {Promise<void>}
+     */
     async put(id, data, meta) {
       const rec = {
         id,
@@ -238,7 +331,12 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         await client.set(key(id), JSON.stringify(rec));
       }
     },
-    // ISSUE-016 FIX: Wrap JSON.parse in try-catch
+
+    /**
+     * Retrieve an artifact.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, data: Buffer, meta: object}|null>} - Artifact or null if not found/expired
+     */
     async get(id) {
       const raw = await client.get(key(id));
       if (!raw) return null;
@@ -249,10 +347,17 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         log?.error?.(`Corrupt Redis artifact ${id}: ${err.message}`);
         return null;
       }
-      return { id, data: Buffer.from(rec.dataB64, "base64"), meta: rec.meta };
+      // ISSUE-029 FIX: Validate base64 data
+      const data = decodeBase64Safe(rec.dataB64, log, `RedisStore artifact ${id}`);
+      if (!data) return null;
+      return { id, data, meta: rec.meta };
     },
-    // ISSUE-006 FIX: Sanitize Redis URL in info output
-    // ISSUE-016 FIX: Wrap JSON.parse in try-catch
+
+    /**
+     * Get artifact metadata.
+     * @param {string} id - Artifact ID
+     * @returns {Promise<{id: string, store: string, createdAt: string, ttlSeconds: number|null, meta: object, bytesStored: number|null}|null>}
+     */
     async info(id) {
       const raw = await client.get(key(id));
       if (!raw) return null;
@@ -264,15 +369,22 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         return null;
       }
       const ttl = await client.ttl(key(id));
+      // ISSUE-029 FIX: Validate base64 for byte count
+      const data = decodeBase64Safe(rec.dataB64, log, `RedisStore artifact ${id}`);
       return {
         id,
         store: `redis:${sanitizeUrl(url)}`,
         createdAt: rec.createdAt,
         ttlSeconds: ttl >= 0 ? ttl : null,
         meta: rec.meta,
-        bytesStored: rec.dataB64 ? Buffer.from(rec.dataB64, "base64").byteLength : null,
+        bytesStored: data ? data.byteLength : null,
       };
     },
+
+    /**
+     * Close the store and release resources.
+     * @returns {Promise<void>}
+     */
     async close() {
       try {
         await client.quit();

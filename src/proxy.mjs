@@ -4,6 +4,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { byteLengthUtf8, safeJsonParse, stableStringify } from "./util.mjs";
 import { createStore } from "./store.mjs";
+import { setActiveStore } from "./cli.mjs";
 
 /**
  * Run the MCP truncation proxy.
@@ -28,6 +29,9 @@ export async function runProxy(config) {
     keyPrefix: config.redisKeyPrefix,
     log,
   });
+
+  // ISSUE-038 FIX: Register store for cleanup on uncaught errors
+  setActiveStore(store);
 
   const child = spawn(config.childCommand[0], config.childCommand.slice(1), {
     stdio: ["pipe", "pipe", "pipe"],
@@ -126,6 +130,7 @@ export async function runProxy(config) {
     return !result || !result.nextCursor;
   }
 
+  // ISSUE-037 FIX: Add warning for tool name collision
   function augmentToolsList(result) {
     if (!result || typeof result !== "object") return result;
     if (!Array.isArray(result.tools)) return result;
@@ -133,8 +138,18 @@ export async function runProxy(config) {
 
     const { getTool, infoTool } = makeInjectedTools();
     const names = new Set(result.tools.map((t) => t?.name).filter(Boolean));
-    if (!names.has(getTool.name)) result.tools.push(getTool);
-    if (config.exposeInfoTool && !names.has(infoTool.name)) result.tools.push(infoTool);
+    if (names.has(getTool.name)) {
+      log.warn(`tool name collision: downstream already has "${getTool.name}", proxy tool not injected. Use --tool-name to change.`);
+    } else {
+      result.tools.push(getTool);
+    }
+    if (config.exposeInfoTool) {
+      if (names.has(infoTool.name)) {
+        log.warn(`tool name collision: downstream already has "${infoTool.name}", proxy info tool not injected. Use --info-tool-name to change.`);
+      } else {
+        result.tools.push(infoTool);
+      }
+    }
     return result;
   }
 
@@ -292,9 +307,19 @@ export async function runProxy(config) {
         parsed = { kind: "unknown", raw: payloadStr };
       }
 
+      // ISSUE-036 FIX: Extract magic numbers to named constants
+      const RETRIEVAL_DEFAULTS = {
+        MAX_LINES: 400,
+        MAX_LINES_LIMIT: 5000,
+        MAX_BYTES: 200000,
+        MAX_BYTES_LIMIT: 2_000_000,
+        HEAD_LINES: 200,
+        TAIL_LINES: 200,
+      };
+
       const mode = String(args.mode ?? "auto");
-      const maxLines = clampInt(args.maxLines ?? 400, 1, 5000);
-      const maxBytes = clampInt(args.maxBytes ?? 200000, 1024, 2_000_000);
+      const maxLines = clampInt(args.maxLines ?? RETRIEVAL_DEFAULTS.MAX_LINES, 1, RETRIEVAL_DEFAULTS.MAX_LINES_LIMIT);
+      const maxBytes = clampInt(args.maxBytes ?? RETRIEVAL_DEFAULTS.MAX_BYTES, 1024, RETRIEVAL_DEFAULTS.MAX_BYTES_LIMIT);
 
       // Prefer extracting content text if available; otherwise return JSON lines.
       let lines;
@@ -308,10 +333,10 @@ export async function runProxy(config) {
         const end = clampInt(args.endLine ?? start, start, lines.length);
         outLines = lines.slice(start - 1, end);
       } else if (mode === "head" || (mode === "auto" && lines.length > 300)) {
-        const n = clampInt(args.headLines ?? 200, 1, 5000);
+        const n = clampInt(args.headLines ?? RETRIEVAL_DEFAULTS.HEAD_LINES, 1, RETRIEVAL_DEFAULTS.MAX_LINES_LIMIT);
         outLines = lines.slice(0, n);
       } else if (mode === "tail") {
-        const n = clampInt(args.tailLines ?? 200, 1, 5000);
+        const n = clampInt(args.tailLines ?? RETRIEVAL_DEFAULTS.TAIL_LINES, 1, RETRIEVAL_DEFAULTS.MAX_LINES_LIMIT);
         outLines = lines.slice(Math.max(0, lines.length - n));
       } else if (mode === "grep") {
         const pattern = String(args.pattern ?? "");
@@ -323,7 +348,8 @@ export async function runProxy(config) {
         if (rx?.error) {
           return makeJsonRpcResponse(id, { content: [{ type: "text", text: rx.error }], isError: true });
         }
-        outLines = lines.filter((l) => (rx ? rx.test(l) : l.toLowerCase().includes(pattern.toLowerCase())));
+        // ISSUE-031: parsePattern now always returns a RegExp for valid input
+        outLines = lines.filter((l) => rx.test(l));
       } else if (mode === "json") {
         const jsonText = stableStringify(parsed.result ?? parsed);
         const clipped = clipBytes(jsonText, maxBytes);
@@ -559,6 +585,7 @@ function clampInt(v, min, max) {
 }
 
 // ISSUE-009 FIX: Return error object for invalid regex patterns
+// ISSUE-031 FIX: Handle plain strings as escaped case-insensitive regex
 function parsePattern(pattern) {
   // Accept /re/flags style regex
   if (pattern.startsWith("/") && pattern.lastIndexOf("/") > 0) {
@@ -571,7 +598,9 @@ function parsePattern(pattern) {
       return { error: `Invalid regex: ${err.message}` };
     }
   }
-  return null;
+  // Plain string: escape special chars and create case-insensitive regex
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(escaped, "i");
 }
 
 function clipBytes(s, maxBytes) {
