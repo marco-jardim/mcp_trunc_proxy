@@ -34,8 +34,11 @@ export async function runProxy(config) {
     env: process.env,
   });
 
+  // ISSUE-028 FIX: Standardize log message formats
   child.on("exit", (code, signal) => {
-    log.info(`downstream exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+    log.info(`downstream exited: code=${code ?? "null"} signal=${signal ?? "null"}`);
+    // ISSUE-005 FIX: Clear pending map on child exit to prevent memory leak
+    pending.clear();
     process.exitCode = code ?? 1;
   });
 
@@ -46,6 +49,19 @@ export async function runProxy(config) {
 
   // Track request ids -> method/name so we can patch responses.
   const pending = new Map();
+
+  // ISSUE-018 FIX: Periodic timeout check for pending requests
+  const REQUEST_TIMEOUT_MS = 300_000; // 5 minutes
+  const timeoutInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [id, req] of pending) {
+      if (now - req.at > REQUEST_TIMEOUT_MS) {
+        log.warn(`request ${id} timed out after ${REQUEST_TIMEOUT_MS}ms`);
+        pending.delete(id);
+      }
+    }
+  }, 60_000);
+  timeoutInterval.unref?.();
 
   // --- Helpers -------------------------------------------------------------
 
@@ -122,6 +138,9 @@ export async function runProxy(config) {
     return result;
   }
 
+  // ISSUE-015 FIX: Extract magic number to named constant
+  const EXTRACT_MAX_CHARS = 500;
+
   function extractTextLinesFromToolResult(toolResult) {
     // toolResult is expected to be a CallToolResult-like object with `content: [...]`.
     // We'll try to produce a line-oriented text for slicing/grepping.
@@ -135,7 +154,7 @@ export async function runProxy(config) {
         } else if (item?.type === "image") {
           texts.push("[image] (omitted)");
         } else if (typeof item === "object") {
-          texts.push(`[content:${item.type ?? "unknown"}] ${stableStringify(item).slice(0, 500)}`);
+          texts.push(`[content:${item.type ?? "unknown"}] ${stableStringify(item).slice(0, EXTRACT_MAX_CHARS)}`);
         } else {
           texts.push(String(item));
         }
@@ -213,7 +232,14 @@ export async function runProxy(config) {
     const payloadStr = stableStringify(payload);
     const artifactId = mkArtifactId(payloadStr);
 
-    const gz = gzipSync(Buffer.from(payloadStr, "utf8"));
+    // ISSUE-019 FIX: Add try-catch around gzipSync with logging
+    let gz;
+    try {
+      gz = gzipSync(Buffer.from(payloadStr, "utf8"));
+    } catch (err) {
+      log.error(`failed to compress artifact: ${err.message}`);
+      throw err; // Let caller handle fallback
+    }
     await store.put(artifactId, gz, {
       toolName,
       requestId,
@@ -250,7 +276,16 @@ export async function runProxy(config) {
         return makeJsonRpcResponse(id, { content: [{ type: "text", text: `artifact not found: ${artId}` }], isError: true });
       }
 
-      const payloadStr = gunzipSync(rec.data).toString("utf8");
+      // ISSUE-003 FIX: Wrap gunzipSync in try-catch to handle corrupt/truncated data
+      let payloadStr;
+      try {
+        payloadStr = gunzipSync(rec.data).toString("utf8");
+      } catch (decompressErr) {
+        return makeJsonRpcResponse(id, {
+          content: [{ type: "text", text: `Error decompressing artifact ${artId}: ${decompressErr.message}` }],
+          isError: true
+        });
+      }
       let parsed = safeJsonParse(payloadStr);
       if (!parsed) {
         // fallback: treat as text
@@ -284,6 +319,10 @@ export async function runProxy(config) {
           return makeJsonRpcError(id, -32602, "Missing required argument: pattern for mode=grep");
         }
         const rx = parsePattern(pattern);
+        // ISSUE-009 FIX: Check for regex parsing error
+        if (rx?.error) {
+          return makeJsonRpcResponse(id, { content: [{ type: "text", text: rx.error }], isError: true });
+        }
         outLines = lines.filter((l) => (rx ? rx.test(l) : l.toLowerCase().includes(pattern.toLowerCase())));
       } else if (mode === "json") {
         const jsonText = stableStringify(parsed.result ?? parsed);
@@ -460,7 +499,7 @@ export async function runProxy(config) {
               toolResult: msg.result,
             });
           } catch (e) {
-            log.error(`failed to store artifact; falling back to preview-only: ${e?.message ?? e}`);
+            log.error(`store artifact failed: ${e?.message ?? e}`);
             // Fallback: truncate content without storing
             msg.result = buildTruncatedToolResult({
               artifactId: "STORE_FAILED",
@@ -478,6 +517,32 @@ export async function runProxy(config) {
     return msg;
   }
 
+  // ISSUE-004 FIX: Graceful shutdown handlers
+  // ISSUE-020 FIX: Add timeout to prevent hanging forever
+  const shutdown = async (signal) => {
+    log.info(`received ${signal}: shutting down`);
+    child.kill("SIGTERM");
+    clearInterval(timeoutInterval);
+
+    // Force exit after 5 seconds if store.close() hangs
+    const forceExit = setTimeout(() => {
+      log.warn("graceful shutdown timed out, forcing exit");
+      process.exit(1);
+    }, 5000);
+    forceExit.unref?.();
+
+    try {
+      await store.close();
+    } catch (err) {
+      log.error(`error closing store: ${err.message}`);
+    }
+    clearTimeout(forceExit);
+    process.exit(0);
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
   // Friendly boot log
   log.info(
     `mcp-trunc-proxy started: maxBytes=${config.maxBytes} store=${config.store} tool=${config.toolName}` +
@@ -493,6 +558,7 @@ function clampInt(v, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
+// ISSUE-009 FIX: Return error object for invalid regex patterns
 function parsePattern(pattern) {
   // Accept /re/flags style regex
   if (pattern.startsWith("/") && pattern.lastIndexOf("/") > 0) {
@@ -501,8 +567,8 @@ function parsePattern(pattern) {
     const flags = pattern.slice(last + 1);
     try {
       return new RegExp(body, flags);
-    } catch {
-      return null;
+    } catch (err) {
+      return { error: `Invalid regex: ${err.message}` };
     }
   }
   return null;

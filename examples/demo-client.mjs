@@ -5,7 +5,7 @@
  *  - tools/call huge_log
  *
  * Run:
- *   node examples/demo-client.mjs | node src/cli.mjs --max-bytes 20000 -- -- node examples/fake-mcp-server.mjs
+ *   node examples/demo-client.mjs | node src/cli.mjs --max-bytes 20000 -- node examples/fake-mcp-server.mjs
  *
  * Or run the proxy first and pipe this client into it.
  */

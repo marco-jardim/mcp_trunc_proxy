@@ -1,4 +1,14 @@
+#!/usr/bin/env node
 import { runProxy } from "./proxy.mjs";
+
+// ISSUE-023 FIX: Helper for parsing numeric arguments with clear errors
+function parseNumericArg(value, argName) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`--${argName} requires a numeric value, got: ${value}`);
+  }
+  return n;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -34,12 +44,12 @@ function parseArgs(argv) {
     const next = val ?? argv[i + 1];
 
     switch (key) {
-      case "--max-bytes": args.maxBytes = Number(next); i += val ? 1 : 2; break;
-      case "--preview-max-chars": args.previewMaxChars = Number(next); i += val ? 1 : 2; break;
-      case "--head-lines": args.headLines = Number(next); i += val ? 1 : 2; break;
-      case "--tail-lines": args.tailLines = Number(next); i += val ? 1 : 2; break;
-      case "--ttl-seconds": args.ttlSeconds = Number(next); i += val ? 1 : 2; break;
-      case "--max-artifacts": args.maxArtifacts = Number(next); i += val ? 1 : 2; break;
+      case "--max-bytes": args.maxBytes = parseNumericArg(next, "max-bytes"); i += val ? 1 : 2; break;
+      case "--preview-max-chars": args.previewMaxChars = parseNumericArg(next, "preview-max-chars"); i += val ? 1 : 2; break;
+      case "--head-lines": args.headLines = parseNumericArg(next, "head-lines"); i += val ? 1 : 2; break;
+      case "--tail-lines": args.tailLines = parseNumericArg(next, "tail-lines"); i += val ? 1 : 2; break;
+      case "--ttl-seconds": args.ttlSeconds = parseNumericArg(next, "ttl-seconds"); i += val ? 1 : 2; break;
+      case "--max-artifacts": args.maxArtifacts = parseNumericArg(next, "max-artifacts"); i += val ? 1 : 2; break;
       case "--store": args.store = String(next); i += val ? 1 : 2; break;
       case "--tool-name": args.toolName = String(next); i += val ? 1 : 2; break;
       case "--info-tool-name": args.infoToolName = String(next); i += val ? 1 : 2; break;
@@ -77,6 +87,7 @@ Options:
   --preview-max-chars <n>   Max chars in preview returned to LLM (default 6000)
   --head-lines <n>          Preview head lines (default 60)
   --tail-lines <n>          Preview tail lines (default 60)
+  --error-pattern <regex>   Custom regex for error extraction (default: error|fail|exception|...)
   --store <spec>            memory (default) | file:<dir> | redis:<url>
   --ttl-seconds <n>         TTL seconds (default 604800; best-effort for memory/file)
   --max-artifacts <n>       In-memory cap (default 2000)
@@ -111,9 +122,24 @@ async function main() {
     return;
   }
 
-  // basic validation
-  if (!Number.isFinite(args.maxBytes) || args.maxBytes < 1024) args.maxBytes = 80000;
-  if (!Number.isFinite(args.previewMaxChars) || args.previewMaxChars < 500) args.previewMaxChars = 6000;
+  // ISSUE-008 FIX: Validate numeric arguments - reject negative/zero values
+  const numericValidations = [
+    { name: "max-bytes", value: args.maxBytes, min: 1024 },
+    { name: "preview-max-chars", value: args.previewMaxChars, min: 500 },
+    { name: "head-lines", value: args.headLines, min: 1 },
+    { name: "tail-lines", value: args.tailLines, min: 1 },
+    { name: "ttl-seconds", value: args.ttlSeconds, min: 1 },
+    { name: "max-artifacts", value: args.maxArtifacts, min: 1 },
+  ];
+
+  for (const { name, value, min } of numericValidations) {
+    if (!Number.isFinite(value) || value < min) {
+      process.stderr.write(`Error: --${name} must be a positive number (minimum ${min})\n\n`);
+      process.stderr.write(usage());
+      process.exit(2);
+      return;
+    }
+  }
 
   await runProxy(args);
 }

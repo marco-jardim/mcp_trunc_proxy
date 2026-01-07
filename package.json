@@ -4,7 +4,7 @@
   "description": "Generic MCP stdio proxy that offloads large tools/call results to an artifact store (memory by default) and returns small previews + retrieval tool.",
   "type": "module",
   "license": "GPL-3.0-only",
-  "author": "You",
+  "author": "Marco Jardim",
   "bin": {
     "mcp-trunc-proxy": "src/cli.mjs"
   },
@@ -14,10 +14,13 @@
   "optionalDependencies": {
     "redis": "^4.7.0"
   },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
   "scripts": {
     "start": "node src/cli.mjs --help",
-    "lint": "node -c src/cli.mjs && node -c src/proxy.mjs && node -c src/store.mjs",
-    "test:smoke": "node ./examples/smoke-server.mjs"
+    "lint": "eslint src/ examples/",
+    "test:smoke": "node ./examples/fake-mcp-server.mjs"
   },
   "keywords": [
     "mcp",
@@ -29,6 +32,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://example.com/your/repo"
+    "url": "https://github.com/marco-jardim/mcp-trunc-proxy"
   }
 }

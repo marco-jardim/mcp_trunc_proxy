@@ -14,6 +14,7 @@ export function byteLengthUtf8(s) {
  * Stable-ish stringify that:
  * - avoids crashing on BigInt
  * - tolerates circular refs (drops cycles)
+ * - NOTE: Symbol keys are dropped (standard JSON behavior)
  */
 export function stableStringify(obj) {
   const seen = new WeakSet();
