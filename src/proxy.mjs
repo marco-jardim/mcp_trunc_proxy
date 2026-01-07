@@ -1,0 +1,529 @@
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { randomBytes, createHash } from "node:crypto";
+import { gzipSync, gunzipSync } from "node:zlib";
+import { byteLengthUtf8, safeJsonParse, stableStringify } from "./util.mjs";
+import { createStore } from "./store.mjs";
+
+/**
+ * Run the MCP truncation proxy.
+ *
+ * The proxy sits between an MCP client (stdin/stdout) and a downstream MCP server process (child).
+ * It forwards all JSON-RPC messages, but:
+ *  - augments tools/list to include proxy_artifact_get (+ proxy_artifact_info)
+ *  - intercepts tools/call results above size threshold, stores them, and returns a compact preview
+ *  - intercepts tools/call for the proxy tools and serves retrievals from the store
+ */
+export async function runProxy(config) {
+  const log = makeLogger(config.logLevel);
+
+  if (!config.childCommand?.length) {
+    throw new Error("No downstream server command provided. Use: mcp-trunc-proxy [opts] -- <server> <args...>");
+  }
+
+  const store = await createStore({
+    spec: config.store,
+    ttlSeconds: config.ttlSeconds,
+    maxArtifacts: config.maxArtifacts,
+    keyPrefix: config.redisKeyPrefix,
+    log,
+  });
+
+  const child = spawn(config.childCommand[0], config.childCommand.slice(1), {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: process.env,
+  });
+
+  child.on("exit", (code, signal) => {
+    log.info(`downstream exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+    process.exitCode = code ?? 1;
+  });
+
+  child.stderr.on("data", (buf) => {
+    // keep downstream logs on stderr so they don't break JSON-RPC
+    process.stderr.write(buf);
+  });
+
+  // Track request ids -> method/name so we can patch responses.
+  const pending = new Map();
+
+  // --- Helpers -------------------------------------------------------------
+
+  function mkArtifactId(payloadStr) {
+    // deterministic-ish but unique: sha256(prefix+random) shortened
+    const h = createHash("sha256");
+    h.update(payloadStr);
+    h.update(randomBytes(16));
+    return `art_${h.digest("base64url").slice(0, 16)}`;
+  }
+
+  function makeInjectedTools() {
+    const getTool = {
+      name: config.toolName,
+      description:
+        "Fetch a targeted slice of an artifact that was offloaded by mcp-trunc-proxy. Use grep/range/tail to avoid pulling the entire artifact.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Artifact id (e.g., art_abcdef0123456789)" },
+          mode: {
+            type: "string",
+            enum: ["auto", "head", "tail", "range", "grep", "full", "json"],
+            default: "auto",
+            description:
+              "auto=head+tail for text; grep filters; range slices by line numbers; full/json returns large output (use cautiously).",
+          },
+          pattern: {
+            type: "string",
+            description:
+              'For mode=grep: substring match (case-insensitive) or regex like "/TypeError:.*/i".',
+          },
+          startLine: { type: "integer", minimum: 1, description: "For mode=range: 1-based start line." },
+          endLine: { type: "integer", minimum: 1, description: "For mode=range: 1-based end line." },
+          headLines: { type: "integer", minimum: 1, default: 200, description: "For mode=head." },
+          tailLines: { type: "integer", minimum: 1, default: 200, description: "For mode=tail." },
+          maxLines: { type: "integer", minimum: 1, default: 400, description: "Hard cap on returned lines." },
+          maxBytes: { type: "integer", minimum: 1024, default: 200000, description: "Hard cap on returned bytes." },
+        },
+        required: ["id"],
+      },
+    };
+
+    const infoTool = {
+      name: config.infoToolName,
+      description: "Get metadata (size, timestamps, tool name) about an offloaded artifact.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+        },
+        required: ["id"],
+      },
+    };
+
+    return { getTool, infoTool };
+  }
+
+  function isFinalToolsListPage(result) {
+    // MCP tools/list uses optional pagination cursor. If nextCursor is absent or falsy, assume final page.
+    // Some servers may omit the field entirely.
+    return !result || !result.nextCursor;
+  }
+
+  function augmentToolsList(result) {
+    if (!result || typeof result !== "object") return result;
+    if (!Array.isArray(result.tools)) return result;
+    if (!isFinalToolsListPage(result)) return result;
+
+    const { getTool, infoTool } = makeInjectedTools();
+    const names = new Set(result.tools.map((t) => t?.name).filter(Boolean));
+    if (!names.has(getTool.name)) result.tools.push(getTool);
+    if (config.exposeInfoTool && !names.has(infoTool.name)) result.tools.push(infoTool);
+    return result;
+  }
+
+  function extractTextLinesFromToolResult(toolResult) {
+    // toolResult is expected to be a CallToolResult-like object with `content: [...]`.
+    // We'll try to produce a line-oriented text for slicing/grepping.
+    const content = toolResult?.content;
+    if (Array.isArray(content)) {
+      const texts = [];
+      for (const item of content) {
+        if (item?.type === "text" && typeof item.text === "string") texts.push(item.text);
+        else if (item?.type === "resource" && typeof item?.resource?.uri === "string") {
+          texts.push(`[resource] ${item.resource.uri}`);
+        } else if (item?.type === "image") {
+          texts.push("[image] (omitted)");
+        } else if (typeof item === "object") {
+          texts.push(`[content:${item.type ?? "unknown"}] ${stableStringify(item).slice(0, 500)}`);
+        } else {
+          texts.push(String(item));
+        }
+      }
+      const joined = texts.join("\n");
+      return joined.split(/\r?\n/);
+    }
+
+    // Fallback: stringify entire result
+    return stableStringify(toolResult).split(/\r?\n/);
+  }
+
+  function summarizeLines(lines) {
+    const head = lines.slice(0, config.headLines);
+    const tail = lines.slice(Math.max(0, lines.length - config.tailLines));
+
+    // "error-ish" extraction
+    const errorish = /(error|fail|failed|exception|traceback|assert|panic|fatal)/i;
+    const picked = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (errorish.test(lines[i])) {
+        for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) picked.push(j);
+        if (picked.length > 120) break;
+      }
+    }
+    const uniq = Array.from(new Set(picked)).sort((a, b) => a - b).slice(0, 120);
+    const errors = uniq.map((i) => lines[i]);
+
+    const parts = [];
+    if (errors.length) {
+      parts.push("### Error excerpts (best-effort)");
+      parts.push(errors.join("\n"));
+    }
+    parts.push("### Head");
+    parts.push(head.join("\n"));
+    parts.push("### Tail");
+    parts.push(tail.join("\n"));
+
+    let preview = parts.join("\n");
+    if (preview.length > config.previewMaxChars) {
+      preview = preview.slice(0, config.previewMaxChars) + "\n…(preview truncated)…";
+    }
+    return preview;
+  }
+
+  function buildTruncatedToolResult({ artifactId, originalBytes, toolName, toolResult }) {
+    const lines = extractTextLinesFromToolResult(toolResult);
+    const preview = summarizeLines(lines);
+
+    const msg =
+      `⚠️ Large tool result offloaded by mcp-trunc-proxy\n` +
+      `tool=${toolName ?? "?"} bytes=${originalBytes} artifact=${artifactId}\n` +
+      `Fetch slices with ${config.toolName} (try grep first):\n` +
+      `  ${config.toolName}({id:"${artifactId}", mode:"grep", pattern:"error"})\n` +
+      `  ${config.toolName}({id:"${artifactId}", mode:"tail", tailLines:200})\n` +
+      `  ${config.infoToolName}({id:"${artifactId}"})\n` +
+      `--- preview ---\n` +
+      preview;
+
+    return {
+      content: [{ type: "text", text: msg }],
+      isError: !!toolResult?.isError,
+    };
+  }
+
+  async function storeToolResultArtifact({ toolName, requestId, resultObj, originalBytes }) {
+    const payload = {
+      kind: "tools/call.result",
+      toolName,
+      requestId,
+      storedAt: new Date().toISOString(),
+      originalBytes,
+      result: resultObj,
+    };
+    const payloadStr = stableStringify(payload);
+    const artifactId = mkArtifactId(payloadStr);
+
+    const gz = gzipSync(Buffer.from(payloadStr, "utf8"));
+    await store.put(artifactId, gz, {
+      toolName,
+      requestId,
+      originalBytes,
+      storedAt: payload.storedAt,
+      bytesStored: gz.byteLength,
+      kind: payload.kind,
+    });
+
+    return artifactId;
+  }
+
+  function makeJsonRpcResponse(id, result) {
+    return { jsonrpc: "2.0", id, result };
+  }
+
+  function makeJsonRpcError(id, code, message, data) {
+    const err = { code, message };
+    if (data !== undefined) err.data = data;
+    return { jsonrpc: "2.0", id, error: err };
+  }
+
+  async function handleProxyToolCall(req) {
+    const id = req.id;
+    const name = req?.params?.name;
+    const args = req?.params?.arguments ?? {};
+
+    if (name === config.toolName) {
+      const artId = String(args.id ?? "");
+      if (!artId) return makeJsonRpcError(id, -32602, "Missing required argument: id");
+
+      const rec = await store.get(artId);
+      if (!rec) {
+        return makeJsonRpcResponse(id, { content: [{ type: "text", text: `artifact not found: ${artId}` }], isError: true });
+      }
+
+      const payloadStr = gunzipSync(rec.data).toString("utf8");
+      let parsed = safeJsonParse(payloadStr);
+      if (!parsed) {
+        // fallback: treat as text
+        parsed = { kind: "unknown", raw: payloadStr };
+      }
+
+      const mode = String(args.mode ?? "auto");
+      const maxLines = clampInt(args.maxLines ?? 400, 1, 5000);
+      const maxBytes = clampInt(args.maxBytes ?? 200000, 1024, 2_000_000);
+
+      // Prefer extracting content text if available; otherwise return JSON lines.
+      let lines;
+      if (parsed?.result) lines = extractTextLinesFromToolResult(parsed.result);
+      else lines = stableStringify(parsed).split(/\r?\n/);
+
+      let outLines = lines;
+
+      if (mode === "range") {
+        const start = clampInt(args.startLine ?? 1, 1, lines.length);
+        const end = clampInt(args.endLine ?? start, start, lines.length);
+        outLines = lines.slice(start - 1, end);
+      } else if (mode === "head" || (mode === "auto" && lines.length > 300)) {
+        const n = clampInt(args.headLines ?? 200, 1, 5000);
+        outLines = lines.slice(0, n);
+      } else if (mode === "tail") {
+        const n = clampInt(args.tailLines ?? 200, 1, 5000);
+        outLines = lines.slice(Math.max(0, lines.length - n));
+      } else if (mode === "grep") {
+        const pattern = String(args.pattern ?? "");
+        if (!pattern) {
+          return makeJsonRpcError(id, -32602, "Missing required argument: pattern for mode=grep");
+        }
+        const rx = parsePattern(pattern);
+        outLines = lines.filter((l) => (rx ? rx.test(l) : l.toLowerCase().includes(pattern.toLowerCase())));
+      } else if (mode === "json") {
+        const jsonText = stableStringify(parsed.result ?? parsed);
+        const clipped = clipBytes(jsonText, maxBytes);
+        return makeJsonRpcResponse(id, { content: [{ type: "text", text: clipped }], isError: false });
+      } else if (mode === "full") {
+        // Return as much as allowed by maxBytes
+        const text = outLines.join("\n");
+        const clipped = clipBytes(text, maxBytes);
+        return makeJsonRpcResponse(id, { content: [{ type: "text", text: clipped }], isError: false });
+      } else {
+        // auto mode: show head+tail summary if large, else show full (bounded)
+        const text = outLines.join("\n");
+        const clipped = clipBytes(text, maxBytes);
+        outLines = clipped.split(/\r?\n/);
+      }
+
+      // Apply caps
+      if (outLines.length > maxLines) outLines = outLines.slice(0, maxLines);
+      const text = outLines.join("\n");
+      const clipped = clipBytes(text, maxBytes);
+
+      const header =
+        `artifact=${artId}\n` +
+        `meta: tool=${rec.meta?.toolName ?? "?"} storedAt=${rec.meta?.storedAt ?? "?"} originalBytes=${rec.meta?.originalBytes ?? "?"}\n` +
+        `---\n`;
+
+      return makeJsonRpcResponse(id, { content: [{ type: "text", text: header + clipped }], isError: false });
+    }
+
+    if (config.exposeInfoTool && name === config.infoToolName) {
+      const artId = String(args.id ?? "");
+      if (!artId) return makeJsonRpcError(id, -32602, "Missing required argument: id");
+      const info = await store.info(artId);
+      if (!info) {
+        return makeJsonRpcResponse(id, { content: [{ type: "text", text: `artifact not found: ${artId}` }], isError: true });
+      }
+      return makeJsonRpcResponse(id, { content: [{ type: "text", text: stableStringify(info) }], isError: false });
+    }
+
+    // Not ours
+    return null;
+  }
+
+  // --- Wiring: client -> proxy -> server -------------------------------
+
+  const rlClient = createInterface({ input: process.stdin, crlfDelay: Infinity });
+
+  rlClient.on("line", async (line) => {
+    if (!line.trim()) return;
+    const msg = safeJsonParse(line);
+    if (!msg) {
+      log.warn("failed to parse client line; passing through raw");
+      child.stdin.write(line + "\n");
+      return;
+    }
+
+    const { forward, immediateResponses } = await processClientMessage(msg);
+    for (const resp of immediateResponses) writeToClient(resp);
+    if (forward !== null) writeToServer(forward);
+  });
+
+  rlClient.on("close", () => {
+    log.info("client stdin closed");
+    child.stdin.end();
+  });
+
+  async function processClientMessage(msg) {
+    const immediateResponses = [];
+
+    // Batch array
+    if (Array.isArray(msg)) {
+      const forwardBatch = [];
+      for (const part of msg) {
+        const { forward, immediateResponses: resps } = await processClientMessage(part);
+        immediateResponses.push(...resps);
+        if (forward !== null) forwardBatch.push(forward);
+      }
+      return { forward: forwardBatch.length ? forwardBatch : null, immediateResponses };
+    }
+
+    // Notifications: no id
+    if (msg && typeof msg === "object" && "method" in msg && !("id" in msg)) {
+      return { forward: msg, immediateResponses };
+    }
+
+    // Requests
+    if (msg && typeof msg === "object" && "method" in msg && "id" in msg) {
+      const method = msg.method;
+      if (method === "tools/call") {
+        const toolName = msg?.params?.name;
+        // If it's our injected tool, handle locally
+        if (toolName === config.toolName || (config.exposeInfoTool && toolName === config.infoToolName)) {
+          const resp = await handleProxyToolCall(msg);
+          if (resp) immediateResponses.push(resp);
+          return { forward: null, immediateResponses };
+        }
+        pending.set(msg.id, { method, toolName, at: Date.now() });
+      } else if (method === "tools/list") {
+        pending.set(msg.id, { method, at: Date.now() });
+      } else {
+        pending.set(msg.id, { method, at: Date.now() });
+      }
+      return { forward: msg, immediateResponses };
+    }
+
+    // Responses from client side shouldn't exist, but just forward.
+    return { forward: msg, immediateResponses };
+  }
+
+  function writeToServer(obj) {
+    const out = stableStringify(obj);
+    child.stdin.write(out + "\n");
+  }
+
+  function writeToClient(obj) {
+    const out = stableStringify(obj);
+    process.stdout.write(out + "\n");
+  }
+
+  // --- Wiring: server -> proxy -> client -------------------------------
+
+  const rlServer = createInterface({ input: child.stdout, crlfDelay: Infinity });
+
+  rlServer.on("line", async (line) => {
+    if (!line.trim()) return;
+    const msg = safeJsonParse(line);
+    if (!msg) {
+      log.warn("failed to parse server line; passing through raw");
+      process.stdout.write(line + "\n");
+      return;
+    }
+
+    const patched = await processServerMessage(msg);
+    if (patched !== null) writeToClient(patched);
+  });
+
+  async function processServerMessage(msg) {
+    // Batch response
+    if (Array.isArray(msg)) {
+      const out = [];
+      for (const part of msg) {
+        const patched = await processServerMessage(part);
+        if (patched !== null) out.push(patched);
+      }
+      return out;
+    }
+
+    // We only patch JSON-RPC responses with matching ids.
+    if (msg && typeof msg === "object" && "id" in msg && ("result" in msg || "error" in msg)) {
+      const req = pending.get(msg.id);
+      if (req) pending.delete(msg.id);
+
+      if (req?.method === "tools/list" && msg.result) {
+        msg.result = augmentToolsList(msg.result);
+        return msg;
+      }
+
+      if (req?.method === "tools/call" && msg.result) {
+        // Decide if we should offload.
+        const bytes = byteLengthUtf8(stableStringify(msg.result));
+        if (bytes > config.maxBytes) {
+          try {
+            const artifactId = await storeToolResultArtifact({
+              toolName: req.toolName,
+              requestId: msg.id,
+              resultObj: msg.result,
+              originalBytes: bytes,
+            });
+            msg.result = buildTruncatedToolResult({
+              artifactId,
+              originalBytes: bytes,
+              toolName: req.toolName,
+              toolResult: msg.result,
+            });
+          } catch (e) {
+            log.error(`failed to store artifact; falling back to preview-only: ${e?.message ?? e}`);
+            // Fallback: truncate content without storing
+            msg.result = buildTruncatedToolResult({
+              artifactId: "STORE_FAILED",
+              originalBytes: bytes,
+              toolName: req.toolName,
+              toolResult: msg.result,
+            });
+          }
+        }
+        return msg;
+      }
+    }
+
+    // Notifications / other messages: pass through unchanged.
+    return msg;
+  }
+
+  // Friendly boot log
+  log.info(
+    `mcp-trunc-proxy started: maxBytes=${config.maxBytes} store=${config.store} tool=${config.toolName}` +
+      (config.exposeInfoTool ? ` infoTool=${config.infoToolName}` : ""),
+  );
+}
+
+// --- Utils ---------------------------------------------------------------
+
+function clampInt(v, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
+function parsePattern(pattern) {
+  // Accept /re/flags style regex
+  if (pattern.startsWith("/") && pattern.lastIndexOf("/") > 0) {
+    const last = pattern.lastIndexOf("/");
+    const body = pattern.slice(1, last);
+    const flags = pattern.slice(last + 1);
+    try {
+      return new RegExp(body, flags);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function clipBytes(s, maxBytes) {
+  const b = Buffer.from(String(s), "utf8");
+  if (b.byteLength <= maxBytes) return String(s);
+  const sliced = b.subarray(0, maxBytes);
+  return sliced.toString("utf8") + "\n…(clipped)…";
+}
+
+function makeLogger(level) {
+  const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 };
+  const cur = levels[level] ?? 3;
+
+  const fmt = (kind, msg) => `[mcp-trunc-proxy] ${kind}: ${msg}\n`;
+  return {
+    error: (m) => cur >= 1 && process.stderr.write(fmt("error", m)),
+    warn: (m) => cur >= 2 && process.stderr.write(fmt("warn", m)),
+    info: (m) => cur >= 3 && process.stderr.write(fmt("info", m)),
+    debug: (m) => cur >= 4 && process.stderr.write(fmt("debug", m)),
+  };
+}

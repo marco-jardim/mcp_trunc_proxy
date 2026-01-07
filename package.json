@@ -1,0 +1,34 @@
+{
+  "name": "mcp-trunc-proxy",
+  "version": "0.1.0",
+  "description": "Generic MCP stdio proxy that offloads large tools/call results to an artifact store (memory by default) and returns small previews + retrieval tool.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "author": "You",
+  "bin": {
+    "mcp-trunc-proxy": "src/cli.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "optionalDependencies": {
+    "redis": "^4.7.0"
+  },
+  "scripts": {
+    "start": "node src/cli.mjs --help",
+    "lint": "node -c src/cli.mjs && node -c src/proxy.mjs && node -c src/store.mjs",
+    "test:smoke": "node ./examples/smoke-server.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "proxy",
+    "tokens",
+    "redis",
+    "artifact"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://example.com/your/repo"
+  }
+}
