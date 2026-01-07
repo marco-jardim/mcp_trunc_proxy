@@ -4,7 +4,8 @@ import { randomBytes, createHash } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { byteLengthUtf8, safeJsonParse, stableStringify } from "./util.mjs";
 import { createStore } from "./store.mjs";
-import { setActiveStore } from "./cli.mjs";
+// ISSUE-040 FIX: Import from state.mjs to avoid circular dependency
+import { setActiveStore } from "./state.mjs";
 
 /**
  * Run the MCP truncation proxy.
@@ -36,6 +37,12 @@ export async function runProxy(config) {
   const child = spawn(config.childCommand[0], config.childCommand.slice(1), {
     stdio: ["pipe", "pipe", "pipe"],
     env: process.env,
+  });
+
+  // ISSUE-047 FIX: Handle child process spawn errors
+  child.on("error", (err) => {
+    log.error(`failed to start downstream server: ${err.message}`);
+    process.exit(1);
   });
 
   // ISSUE-028 FIX: Standardize log message formats
@@ -156,6 +163,16 @@ export async function runProxy(config) {
   // ISSUE-015 FIX: Extract magic number to named constant
   const EXTRACT_MAX_CHARS = 500;
 
+  // ISSUE-043 FIX: Move RETRIEVAL_DEFAULTS to module level (inside runProxy scope)
+  const RETRIEVAL_DEFAULTS = {
+    MAX_LINES: 400,
+    MAX_LINES_LIMIT: 5000,
+    MAX_BYTES: 200000,
+    MAX_BYTES_LIMIT: 2_000_000,
+    HEAD_LINES: 200,
+    TAIL_LINES: 200,
+  };
+
   function extractTextLinesFromToolResult(toolResult) {
     // toolResult is expected to be a CallToolResult-like object with `content: [...]`.
     // We'll try to produce a line-oriented text for slicing/grepping.
@@ -187,11 +204,13 @@ export async function runProxy(config) {
     const tail = lines.slice(Math.max(0, lines.length - config.tailLines));
 
     // "error-ish" extraction
+    // ISSUE-042 FIX: Increase error context to ±5 lines for better stack traces
+    const ERROR_CONTEXT_LINES = 5;
     const errorish = /(error|fail|failed|exception|traceback|assert|panic|fatal)/i;
     const picked = [];
     for (let i = 0; i < lines.length; i++) {
       if (errorish.test(lines[i])) {
-        for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j++) picked.push(j);
+        for (let j = Math.max(0, i - ERROR_CONTEXT_LINES); j <= Math.min(lines.length - 1, i + ERROR_CONTEXT_LINES); j++) picked.push(j);
         if (picked.length > 120) break;
       }
     }
@@ -307,16 +326,7 @@ export async function runProxy(config) {
         parsed = { kind: "unknown", raw: payloadStr };
       }
 
-      // ISSUE-036 FIX: Extract magic numbers to named constants
-      const RETRIEVAL_DEFAULTS = {
-        MAX_LINES: 400,
-        MAX_LINES_LIMIT: 5000,
-        MAX_BYTES: 200000,
-        MAX_BYTES_LIMIT: 2_000_000,
-        HEAD_LINES: 200,
-        TAIL_LINES: 200,
-      };
-
+      // ISSUE-043 FIX: RETRIEVAL_DEFAULTS now at module level
       const mode = String(args.mode ?? "auto");
       const maxLines = clampInt(args.maxLines ?? RETRIEVAL_DEFAULTS.MAX_LINES, 1, RETRIEVAL_DEFAULTS.MAX_LINES_LIMIT);
       const maxBytes = clampInt(args.maxBytes ?? RETRIEVAL_DEFAULTS.MAX_BYTES, 1024, RETRIEVAL_DEFAULTS.MAX_BYTES_LIMIT);
@@ -612,6 +622,10 @@ function clipBytes(s, maxBytes) {
 
 function makeLogger(level) {
   const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 };
+  // ISSUE-045 FIX: Add log level validation warning
+  if (level && !(level in levels)) {
+    process.stderr.write(`[mcp-trunc-proxy] warn: invalid log level "${level}", using "info"\n`);
+  }
   const cur = levels[level] ?? 3;
 
   const fmt = (kind, msg) => `[mcp-trunc-proxy] ${kind}: ${msg}\n`;

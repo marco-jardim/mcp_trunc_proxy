@@ -64,16 +64,25 @@ function parseArgs(argv) {
   return args;
 }
 
-// ISSUE-032 FIX: Add warning for invalid env var values
+// ISSUE-046 FIX: Batch env var validation - collect warnings for single message
+const envWarnings = [];
+
 function envInt(name, fallback) {
   const v = process.env[name];
   if (v == null) return fallback;
   const n = Number(v);
   if (!Number.isFinite(n)) {
-    process.stderr.write(`[mcp-trunc-proxy] warn: invalid ${name}="${v}", using default ${fallback}\n`);
+    envWarnings.push(`${name}="${v}"`);
     return fallback;
   }
   return n;
+}
+
+function flushEnvWarnings() {
+  if (envWarnings.length > 0) {
+    process.stderr.write(`[mcp-trunc-proxy] warn: invalid env vars: ${envWarnings.join(", ")}, using defaults\n`);
+    envWarnings.length = 0;
+  }
 }
 
 function usage() {
@@ -114,6 +123,8 @@ async function main() {
   let args;
   try {
     args = parseArgs(argv);
+    // ISSUE-046 FIX: Flush batched env var warnings after parsing
+    flushEnvWarnings();
   } catch (e) {
     process.stderr.write(String(e?.message ?? e) + "\n\n");
     process.stderr.write(usage());
@@ -149,16 +160,13 @@ async function main() {
   await runProxy(args);
 }
 
-// ISSUE-038 FIX: Track store for cleanup on uncaught error
-let activeStore = null;
-
-export function setActiveStore(store) {
-  activeStore = store;
-}
+// ISSUE-040 FIX: Import from state.mjs to avoid circular dependency
+import { getActiveStore } from "./state.mjs";
 
 main().catch(async (e) => {
   process.stderr.write(`[mcp-trunc-proxy] fatal: ${e?.stack ?? e}\n`);
-  // Attempt cleanup if store was created
+  // ISSUE-038 FIX: Attempt cleanup if store was created
+  const activeStore = getActiveStore();
   if (activeStore) {
     try {
       await activeStore.close();

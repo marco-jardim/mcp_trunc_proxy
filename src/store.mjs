@@ -156,6 +156,7 @@ async function createFileStore({ dir, ttlSeconds, log }) {
   }
 
   // ISSUE-011 FIX: Proactive cleanup interval for expired files
+  // ISSUE-044 FIX: Read only first 200 bytes to check expiry instead of entire file
   async function cleanup() {
     try {
       const files = await readdir(baseDir);
@@ -164,10 +165,24 @@ async function createFileStore({ dir, ttlSeconds, log }) {
         if (!file.endsWith(".json")) continue;
         const filePath = join(baseDir, file);
         try {
-          const raw = await readFile(filePath, "utf8");
-          const rec = JSON.parse(raw);
-          if (rec.expiresAt && Date.parse(rec.expiresAt) <= now) {
-            await unlink(filePath).catch(() => {});
+          // Read only first 200 bytes to find expiresAt without loading entire file
+          const { open } = await import("node:fs/promises");
+          const handle = await open(filePath, "r");
+          try {
+            const buf = Buffer.alloc(200);
+            await handle.read(buf, 0, 200, 0);
+            const partial = buf.toString("utf8");
+            const match = partial.match(/"expiresAt"\s*:\s*"([^"]+)"/);
+            if (match) {
+              const expiresAt = Date.parse(match[1]);
+              if (expiresAt && expiresAt <= now) {
+                await handle.close();
+                await unlink(filePath).catch(() => {});
+                continue;
+              }
+            }
+          } finally {
+            await handle.close().catch(() => {});
           }
         } catch {
           // Ignore errors during cleanup - file may be corrupt or in use
@@ -318,6 +333,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
      * @param {object} meta - Metadata
      * @returns {Promise<void>}
      */
+    // ISSUE-041 FIX: Wrap Redis operations in try-catch
     async put(id, data, meta) {
       const rec = {
         id,
@@ -325,10 +341,15 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         meta,
         dataB64: Buffer.from(data).toString("base64"),
       };
-      if (ttlSeconds) {
-        await client.set(key(id), JSON.stringify(rec), { EX: ttlSeconds });
-      } else {
-        await client.set(key(id), JSON.stringify(rec));
+      try {
+        if (ttlSeconds) {
+          await client.set(key(id), JSON.stringify(rec), { EX: ttlSeconds });
+        } else {
+          await client.set(key(id), JSON.stringify(rec));
+        }
+      } catch (err) {
+        log?.error?.(`Redis put failed for ${id}: ${err.message}`);
+        throw err;
       }
     },
 
@@ -337,8 +358,15 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
      * @param {string} id - Artifact ID
      * @returns {Promise<{id: string, data: Buffer, meta: object}|null>} - Artifact or null if not found/expired
      */
+    // ISSUE-041 FIX: Wrap Redis operations in try-catch
     async get(id) {
-      const raw = await client.get(key(id));
+      let raw;
+      try {
+        raw = await client.get(key(id));
+      } catch (err) {
+        log?.error?.(`Redis get failed for ${id}: ${err.message}`);
+        throw err;
+      }
       if (!raw) return null;
       let rec;
       try {
@@ -358,9 +386,17 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
      * @param {string} id - Artifact ID
      * @returns {Promise<{id: string, store: string, createdAt: string, ttlSeconds: number|null, meta: object, bytesStored: number|null}|null>}
      */
+    // ISSUE-041 FIX: Wrap Redis operations in try-catch
     async info(id) {
-      const raw = await client.get(key(id));
-      if (!raw) return null;
+      let raw, ttl;
+      try {
+        raw = await client.get(key(id));
+        if (!raw) return null;
+        ttl = await client.ttl(key(id));
+      } catch (err) {
+        log?.error?.(`Redis info failed for ${id}: ${err.message}`);
+        throw err;
+      }
       let rec;
       try {
         rec = JSON.parse(raw);
@@ -368,7 +404,6 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         log?.error?.(`Corrupt Redis artifact ${id}: ${err.message}`);
         return null;
       }
-      const ttl = await client.ttl(key(id));
       // ISSUE-029 FIX: Validate base64 for byte count
       const data = decodeBase64Safe(rec.dataB64, log, `RedisStore artifact ${id}`);
       return {
