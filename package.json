@@ -15,7 +15,9 @@
     "redis": "^5.10.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
     "eslint": "^9.39.2",
+    "globals": "^17.0.0",
     "vitest": "^4.0.16"
   },
   "scripts": {
@@ -40,7 +42,7 @@
     "redis",
     "artifact"
   ],
-"repository": {
+  "repository": {
     "type": "git",
     "url": "git+https://github.com/marco-jardim/mcp_trunc_proxy.git"
   },

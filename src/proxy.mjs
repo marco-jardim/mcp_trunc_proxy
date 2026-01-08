@@ -239,13 +239,13 @@ export async function runProxy(config) {
     const preview = summarizeLines(lines);
 
     const msg =
-      `⚠️ Large tool result offloaded by mcp-trunc-proxy\n` +
+      "⚠️ Large tool result offloaded by mcp-trunc-proxy\n" +
       `tool=${toolName ?? "?"} bytes=${originalBytes} artifact=${artifactId}\n` +
       `Fetch slices with ${config.toolName} (try grep first):\n` +
       `  ${config.toolName}({id:"${artifactId}", mode:"grep", pattern:"error"})\n` +
       `  ${config.toolName}({id:"${artifactId}", mode:"tail", tailLines:200})\n` +
       `  ${config.infoToolName}({id:"${artifactId}"})\n` +
-      `--- preview ---\n` +
+      "--- preview ---\n" +
       preview;
 
     return {
@@ -384,7 +384,7 @@ export async function runProxy(config) {
       const header =
         `artifact=${artId}\n` +
         `meta: tool=${rec.meta?.toolName ?? "?"} storedAt=${rec.meta?.storedAt ?? "?"} originalBytes=${rec.meta?.originalBytes ?? "?"}\n` +
-        `---\n`;
+        "---\n";
 
       return makeJsonRpcResponse(id, { content: [{ type: "text", text: header + clipped }], isError: false });
     }

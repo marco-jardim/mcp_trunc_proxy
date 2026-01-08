@@ -297,7 +297,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
   try {
     redisMod = await import("redis");
   } catch (e) {
-    throw new Error(`Redis store requested but 'redis' package is not installed. Run: npm i redis`);
+    throw new Error("Redis store requested but 'redis' package is not installed. Run: npm i redis");
   }
   const { createClient } = redisMod;
 
