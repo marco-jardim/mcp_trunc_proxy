@@ -2,8 +2,7 @@
  * End-to-end tests for mcp-trunc-proxy
  * Spawns the actual proxy with fake-mcp-server and tests full flow
  */
-import { test, describe, before, after } from "node:test";
-import assert from "node:assert";
+import { test, describe, beforeAll, afterAll, expect, assert } from "vitest";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -94,12 +93,12 @@ class ProxyClient {
 describe("E2E: Proxy with fake-mcp-server", () => {
   let client;
 
-  before(async () => {
+  beforeAll(async () => {
     client = new ProxyClient(20000);
     await client.start();
   });
 
-  after(async () => {
+  afterAll(async () => {
     await client.stop();
   });
 

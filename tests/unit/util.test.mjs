@@ -1,8 +1,8 @@
 /**
  * Unit tests for src/util.mjs
  */
-import { test, describe } from "node:test";
-import assert from "node:assert";
+import { test, describe } from "vitest";
+import { expect, assert } from "vitest";
 import { stableStringify, safeJsonParse, byteLengthUtf8 } from "../../src/util.mjs";
 
 describe("util.mjs", () => {

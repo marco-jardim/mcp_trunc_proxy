@@ -15,16 +15,18 @@
     "redis": "^4.7.0"
   },
   "devDependencies": {
-    "eslint": "^8.57.0"
+    "eslint": "^8.57.0",
+    "vitest": "^2.1.0"
   },
   "scripts": {
     "start": "node src/cli.mjs --help",
     "lint": "eslint src/ examples/",
-    "test": "node --test tests/unit/*.test.mjs tests/functional/*.test.mjs",
-    "test:unit": "node --test tests/unit/*.test.mjs",
-    "test:functional": "node --test tests/functional/*.test.mjs",
-    "test:e2e": "node --test tests/e2e/*.test.mjs",
-    "test:all": "node --test tests/**/*.test.mjs",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:functional": "vitest run tests/functional",
+    "test:e2e": "vitest run tests/e2e",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "test:smoke": "node ./examples/fake-mcp-server.mjs",
     "benchmark": "node benchmarks/run-all.mjs",
     "benchmark:tokens": "node benchmarks/token-reduction.mjs",

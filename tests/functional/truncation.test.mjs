@@ -2,8 +2,8 @@
  * Functional tests for truncation logic
  * Tests the core value proposition: large payloads → compact previews
  */
-import { test, describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert";
+import { test, describe, beforeEach, afterEach } from "vitest";
+import { expect, assert } from "vitest";
 import { createStore } from "../../src/store.mjs";
 import { gzipSync, gunzipSync } from "node:zlib";
 

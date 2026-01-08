@@ -1,8 +1,8 @@
 /**
  * Unit tests for src/cli.mjs (argument parsing and validation)
  */
-import { test, describe } from "node:test";
-import assert from "node:assert";
+import { test, describe } from "vitest";
+import { expect, assert } from "vitest";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";

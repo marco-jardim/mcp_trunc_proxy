@@ -2,8 +2,8 @@
  * Functional tests for error handling
  * Tests edge cases and error conditions
  */
-import { test, describe, beforeEach, afterEach } from "node:test";
-import assert from "node:assert";
+import { test, describe, beforeEach, afterEach } from "vitest";
+import { expect, assert } from "vitest";
 import { createStore } from "../../src/store.mjs";
 import { gzipSync } from "node:zlib";
 import { rm, writeFile, mkdir } from "node:fs/promises";

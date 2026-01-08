@@ -2,8 +2,8 @@
  * Unit tests for src/proxy.mjs (internal functions)
  * Tests the pure functions without spawning child processes
  */
-import { test, describe } from "node:test";
-import assert from "node:assert";
+import { test, describe } from "vitest";
+import { expect, assert } from "vitest";
 import { gzipSync, gunzipSync } from "node:zlib";
 
 // Since proxy.mjs doesn't export internal functions, we test via integration
