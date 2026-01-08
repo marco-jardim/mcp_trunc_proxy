@@ -1,0 +1,38 @@
+# Tests
+tests/
+
+# Benchmarks
+benchmarks/
+
+# Documentation (keep README)
+docs/
+AGENTS.md
+CHANGELOG.md
+
+# Development
+.github/
+.eslintrc.json
+vitest.config.mjs
+
+# Examples
+examples/
+
+# Tools
+tools/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local artifacts
+.mcp-artifacts/

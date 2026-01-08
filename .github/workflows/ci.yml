@@ -73,12 +73,15 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -96,14 +99,23 @@ jobs:
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$PUBLISHED" != "$CURRENT" ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
+            echo "current=$CURRENT" >> $GITHUB_OUTPUT
             echo "Version changed: $PUBLISHED -> $CURRENT"
           else
             echo "changed=false" >> $GITHUB_OUTPUT
             echo "Version unchanged: $CURRENT"
           fi
 
-      - name: Publish to npm
+      - name: Publish to npm (Trusted Publishing)
         if: steps.version.outputs.changed == 'true'
         run: npm publish --provenance --access public
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.current }}
+          name: Release v${{ steps.version.outputs.current }}
+          generate_release_notes: true
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

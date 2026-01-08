@@ -1,6 +1,6 @@
 {
   "name": "mcp-trunc-proxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Generic MCP stdio proxy that offloads large tools/call results to an artifact store (memory by default) and returns small previews + retrieval tool.",
   "type": "module",
   "license": "GPL-3.0-only",
@@ -42,6 +42,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/marco-jardim/mcp-trunc-proxy"
-  }
+    "url": "git+https://github.com/marco-jardim/mcp-trunc-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marco-jardim/mcp-trunc-proxy/issues"
+  },
+  "homepage": "https://github.com/marco-jardim/mcp-trunc-proxy#readme"
 }
