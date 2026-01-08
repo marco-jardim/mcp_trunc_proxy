@@ -40,12 +40,12 @@
     "redis",
     "artifact"
   ],
-  "repository": {
+"repository": {
     "type": "git",
-    "url": "git+https://github.com/marco-jardim/mcp-trunc-proxy.git"
+    "url": "git+https://github.com/marco-jardim/mcp_trunc_proxy.git"
   },
   "bugs": {
-    "url": "https://github.com/marco-jardim/mcp-trunc-proxy/issues"
+    "url": "https://github.com/marco-jardim/mcp_trunc_proxy/issues"
   },
-  "homepage": "https://github.com/marco-jardim/mcp-trunc-proxy#readme"
+  "homepage": "https://github.com/marco-jardim/mcp_trunc_proxy#readme"
 }
