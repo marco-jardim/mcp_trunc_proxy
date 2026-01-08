@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import { runProxy } from "./proxy.mjs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// ISSUE-055 FIX: Load version from package.json
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "../package.json"), "utf8"));
 
 // ISSUE-023 FIX: Helper for parsing numeric arguments with clear errors
 function parseNumericArg(value, argName) {
@@ -37,6 +44,12 @@ function parseArgs(argv) {
     }
     if (a === "--help" || a === "-h") {
       args.help = true;
+      i++;
+      continue;
+    }
+    // ISSUE-055 FIX: Add --version flag
+    if (a === "--version" || a === "-v") {
+      args.version = true;
       i++;
       continue;
     }
@@ -111,6 +124,7 @@ Options:
   --redis-key-prefix <p>    Redis key prefix (default mcp-trunc-proxy)
   --log-level <level>       silent|error|warn|info|debug (default info)
   -h, --help                Show this help
+  -v, --version             Show version
 
 Environment variables (optional):
   MCP_TRUNC_PROXY_STORE, MCP_TRUNC_PROXY_MAX_BYTES, MCP_TRUNC_PROXY_TTL_SECONDS, MCP_TRUNC_PROXY_LOG_LEVEL, ...
@@ -129,6 +143,13 @@ async function main() {
     process.stderr.write(String(e?.message ?? e) + "\n\n");
     process.stderr.write(usage());
     process.exit(2);
+    return;
+  }
+
+  // ISSUE-055 FIX: Handle --version flag
+  if (args.version) {
+    process.stdout.write(`mcp-trunc-proxy v${pkg.version}\n`);
+    process.exit(0);
     return;
   }
 

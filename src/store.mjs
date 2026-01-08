@@ -1,5 +1,6 @@
 // ISSUE-025 FIX: Remove unused stat import
-import { mkdir, readFile, writeFile, readdir, unlink, rename } from "node:fs/promises";
+// ISSUE-049 FIX: Add open to module imports (was dynamic import in loop)
+import { mkdir, readFile, writeFile, readdir, unlink, rename, open } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -23,13 +24,13 @@ export async function createStore({ spec, ttlSeconds, maxArtifacts, keyPrefix, l
 // ISSUE-029 FIX: Safe base64 decoding with validation
 function decodeBase64Safe(b64, log, context) {
   if (typeof b64 !== "string" || !b64) {
-    log?.error?.(`Invalid base64 data in ${context}: expected string, got ${typeof b64}`);
+    log?.error?.(`invalid base64 data in ${context}: expected string, got ${typeof b64}`);
     return null;
   }
   try {
     return Buffer.from(b64, "base64");
   } catch (err) {
-    log?.error?.(`Failed to decode base64 in ${context}: ${err.message}`);
+    log?.error?.(`failed to decode base64 in ${context}: ${err.message}`);
     return null;
   }
 }
@@ -65,6 +66,7 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
      * @param {object} meta - Metadata
      * @returns {Promise<void>}
      */
+    // ISSUE-052 FIX: Only sweep when near capacity (90%+), periodic interval handles normal expiry
     async put(id, data, meta) {
       const now = Date.now();
       map.set(id, {
@@ -74,7 +76,9 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
         lastAccess: now,
         expiresAt: ttlSeconds ? now + ttlSeconds * 1000 : null,
       });
-      sweep();
+      if (map.size >= effectiveMaxArtifacts * 0.9) {
+        sweep();
+      }
     },
 
     /**
@@ -145,18 +149,20 @@ async function createFileStore({ dir, ttlSeconds, log }) {
       try {
         return { rec: JSON.parse(raw), filePath };
       } catch (parseErr) {
-        log?.error?.(`Corrupt artifact file ${id}: ${parseErr.message}`);
+        log?.error?.(`corrupt artifact file ${id}: ${parseErr.message}`);
         return { rec: null, filePath };
       }
     } catch (err) {
       if (err.code === "ENOENT") return { rec: null, filePath };
-      log?.error?.(`Error reading artifact file ${id}: ${err.message}`);
+      log?.error?.(`error reading artifact file ${id}: ${err.message}`);
       return { rec: null, filePath };
     }
   }
 
   // ISSUE-011 FIX: Proactive cleanup interval for expired files
   // ISSUE-044 FIX: Read only first 200 bytes to check expiry instead of entire file
+  // ISSUE-049 FIX: Use module-level import instead of dynamic import in loop
+  // ISSUE-051 FIX: Use flag to prevent double-close
   async function cleanup() {
     try {
       const files = await readdir(baseDir);
@@ -164,28 +170,25 @@ async function createFileStore({ dir, ttlSeconds, log }) {
       for (const file of files) {
         if (!file.endsWith(".json")) continue;
         const filePath = join(baseDir, file);
+        let handle = null;
         try {
-          // Read only first 200 bytes to find expiresAt without loading entire file
-          const { open } = await import("node:fs/promises");
-          const handle = await open(filePath, "r");
-          try {
-            const buf = Buffer.alloc(200);
-            await handle.read(buf, 0, 200, 0);
-            const partial = buf.toString("utf8");
-            const match = partial.match(/"expiresAt"\s*:\s*"([^"]+)"/);
-            if (match) {
-              const expiresAt = Date.parse(match[1]);
-              if (expiresAt && expiresAt <= now) {
-                await handle.close();
-                await unlink(filePath).catch(() => {});
-                continue;
-              }
+          handle = await open(filePath, "r");
+          const buf = Buffer.alloc(200);
+          await handle.read(buf, 0, 200, 0);
+          const partial = buf.toString("utf8");
+          const match = partial.match(/"expiresAt"\s*:\s*"([^"]+)"/);
+          if (match) {
+            const expiresAt = Date.parse(match[1]);
+            if (expiresAt && expiresAt <= now) {
+              await handle.close();
+              handle = null; // Mark as closed
+              await unlink(filePath).catch(() => {});
             }
-          } finally {
-            await handle.close().catch(() => {});
           }
         } catch {
           // Ignore errors during cleanup - file may be corrupt or in use
+        } finally {
+          if (handle) await handle.close().catch(() => {});
         }
       }
     } catch {
@@ -348,7 +351,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
           await client.set(key(id), JSON.stringify(rec));
         }
       } catch (err) {
-        log?.error?.(`Redis put failed for ${id}: ${err.message}`);
+        log?.error?.(`redis put failed for ${id}: ${err.message}`);
         throw err;
       }
     },
@@ -364,7 +367,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
       try {
         raw = await client.get(key(id));
       } catch (err) {
-        log?.error?.(`Redis get failed for ${id}: ${err.message}`);
+        log?.error?.(`redis get failed for ${id}: ${err.message}`);
         throw err;
       }
       if (!raw) return null;
@@ -372,7 +375,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
       try {
         rec = JSON.parse(raw);
       } catch (err) {
-        log?.error?.(`Corrupt Redis artifact ${id}: ${err.message}`);
+        log?.error?.(`corrupt redis artifact ${id}: ${err.message}`);
         return null;
       }
       // ISSUE-029 FIX: Validate base64 data
@@ -394,14 +397,14 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         if (!raw) return null;
         ttl = await client.ttl(key(id));
       } catch (err) {
-        log?.error?.(`Redis info failed for ${id}: ${err.message}`);
+        log?.error?.(`redis info failed for ${id}: ${err.message}`);
         throw err;
       }
       let rec;
       try {
         rec = JSON.parse(raw);
       } catch (err) {
-        log?.error?.(`Corrupt Redis artifact ${id}: ${err.message}`);
+        log?.error?.(`corrupt redis artifact ${id}: ${err.message}`);
         return null;
       }
       // ISSUE-029 FIX: Validate base64 for byte count
