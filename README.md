@@ -37,6 +37,7 @@ A **generic MCP stdio proxy** that saves tokens by **offloading large `tools/cal
 - [Configuration](#configuration)
 - [Storage Backends](#storage-backends)
 - [Tuning Guide](#tuning-guide)
+- [Troubleshooting](#troubleshooting)
 - [Security](#security)
 - [Reliability](#reliability)
 - [Development](#development)
@@ -465,18 +466,46 @@ An npm package that intercepts large MCP tool outputs, stores them compressed, a
 
 ## Your Task
 
-1. **Find my MCP configuration file** (check in order, use first found):
+### Phase 0: Prerequisites
+
+1. **Check if mcp-trunc-proxy is installed globally:**
+   ```bash
+   npm list -g mcp-trunc-proxy
+   ```
+
+2. **If NOT installed, install it globally** (faster startup, no npx overhead):
+   ```bash
+   npm install -g mcp-trunc-proxy
+   ```
+   
+3. **Verify installation:**
+   ```bash
+   mcp-trunc-proxy --version
+   # Should output version number like "1.x.x"
+   ```
+
+4. **If global install fails** (permissions, corporate proxy, etc.), fall back to npx:
+   - The prompt will still work with `npx mcp-trunc-proxy`
+   - Just slightly slower startup per MCP
+
+### Phase 1: Discovery
+
+5. **Find my MCP configuration file** (check in order, use first found):
    - Claude Desktop/Code: ~/.claude/claude_desktop_config.json or %APPDATA%\Claude\claude_desktop_config.json
    - Cursor: .cursor/mcp.json or ~/.cursor/mcp.json  
-   - OpenCode: mcp.json or opencode.json or ~/.config/opencode/config.json
+   - OpenCode: mcp.json or opencode.json or ~/.config/opencode/config.json or ~/.config/opencode/opencode.json
    - Cline: .vscode/cline_mcp_settings.json
    - Continue: ~/.continue/config.json
    - Zed: ~/.config/zed/settings.json
    - Windsurf: ~/.windsurf/config.json or .windsurf/mcp.json
 
-2. **Read the config and analyze each MCP server**
+6. **Read the config and analyze each MCP server**
 
-3. **For each MCP, choose optimal --max-bytes based on this table:**
+7. **Detect my operating system** (Windows requires special handling)
+
+### Phase 2: Configuration
+
+8. **For each MCP, choose optimal --max-bytes based on this table:**
 
    | MCP Server Pattern | --max-bytes | Reason |
    |--------------------|-------------|--------|
@@ -495,53 +524,148 @@ An npm package that intercepts large MCP tool outputs, stores them compressed, a
    | server-docker | 60000 | Container/image lists |
    | everything-else | 80000 | Safe default |
 
-4. **Additional optimizations based on MCP type:**
+9. **Additional optimizations based on MCP type:**
    - Database MCPs: Add `--store file:.mcp-artifacts` for persistence (queries worth caching)
    - Filesystem MCPs with large repos: Consider `--max-bytes 100000`
    - Search MCPs: Can use lower `--max-bytes 40000` (results are summarized)
 
-5. **Transform each MCP entry:**
+10. **Transform each MCP entry:**
    
-   Before:
-   ```json
-   {
-     "command": "npx",
-     "args": ["-y", "@modelcontextprotocol/server-postgres"],
-     "env": { "DATABASE_URL": "..." }
-   }
-   ```
-   
-   After (with optimized params):
-   ```json
-   {
-     "command": "npx",
-     "args": [
-       "mcp-trunc-proxy",
-       "--max-bytes", "120000",
-       "--store", "file:.mcp-artifacts",
-       "--",
-       "npx", "-y", "@modelcontextprotocol/server-postgres"
-     ],
-     "env": { "DATABASE_URL": "..." }
-   }
-   ```
+    If mcp-trunc-proxy is installed globally, use direct command (preferred):
+    ```json
+    {
+      "command": "mcp-trunc-proxy",
+      "args": [
+        "--max-bytes", "120000",
+        "--store", "file:.mcp-artifacts",
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-postgres"
+      ],
+      "env": { "DATABASE_URL": "..." }
+    }
+    ```
+    
+    If using npx (fallback):
+    ```json
+    {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy",
+        "--max-bytes", "120000",
+        "--store", "file:.mcp-artifacts",
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-postgres"
+      ],
+      "env": { "DATABASE_URL": "..." }
+    }
+    ```
 
-6. **Preserve all existing environment variables and arguments**
+11. **Preserve all existing environment variables and arguments**
 
-7. **Save the updated config file**
+12. **Save the updated config file**
 
-8. **Show me a summary table of what you configured:**
-   | MCP Name | --max-bytes | --store | Reason |
-   |----------|-------------|---------|--------|
-   | ... | ... | ... | ... |
+### Phase 3: Verification (MANDATORY - DO NOT SKIP)
 
-9. **Tell me to restart my application**
+13. **Dry-run test EVERY enabled MCP** before telling me to restart:
 
-## Important Notes
-- Do NOT install anything globally - npx handles it
-- Do NOT modify MCPs that are already wrapped with mcp-trunc-proxy
+    ```bash
+    # For each MCP, run with timeout (10-15 seconds)
+    # Use mcp-trunc-proxy directly if installed globally:
+    timeout 10 mcp-trunc-proxy --max-bytes <N> -- <downstream-command> 2>&1
+    
+    # Or with npx:
+    timeout 10 npx mcp-trunc-proxy --max-bytes <N> -- <downstream-command> 2>&1
+    
+    # Success: Shows "Proxy started..." or waits silently for input
+    # Failure: Shows error (spawn ENOENT, spawn EINVAL, ETIMEDOUT, etc.)
+    ```
+
+14. **If a test fails, diagnose and fix:**
+
+    | Error | Cause | Fix |
+    |-------|-------|-----|
+    | `spawn ENOENT` | Command not found | Use absolute path or check package installed |
+    | `spawn EINVAL` | Windows .cmd script issue | Use `node` + JS entry point (see below) |
+    | `ETIMEDOUT` | npx download too slow | Pre-install globally: `npm install -g <pkg>` |
+    | `Cannot find module` | Package not installed | `npm install -g <package>` |
+
+15. **Windows .cmd fix pattern:**
+    
+    When a command like `playwriter` or `serverless` fails with `spawn EINVAL` on Windows:
+    
+    ```bash
+    # Step 1: Find entry point
+    npm root -g  # Get global node_modules path
+    # Then check: <npm-root>/<package>/package.json for "bin" field
+    
+    # Step 2: Convert command to node + entry point
+    # Before: ["playwriter"]
+    # After:  ["node", "C:\\path\\to\\node_modules\\playwriter\\bin.js"]
+    ```
+
+16. **Re-test after each fix** until the MCP passes
+
+17. **Present final verification table:**
+
+    ```
+    ## MCP Proxy Verification Results
+    
+    | MCP Name | Status | Command | Issue | Fix Applied |
+    |----------|--------|---------|-------|-------------|
+    | github | ✅ PASS | npx ... server-github | - | - |
+    | filesystem | ✅ PASS | npx ... server-filesystem | - | - |
+    | playwriter | ✅ PASS | node .../bin.js | spawn EINVAL | node + entry point |
+    | morph-mcp | ✅ PASS | node .../dist/index.js | wrong binary name + EINVAL | fixed name + node |
+    | serverless | ✅ PASS | node .../run.js mcp | spawn EINVAL | node + entry point |
+    
+    ### Summary
+    - Total MCPs: 5
+    - Passed: 5
+    - Fixed: 3
+    - Still Failing: 0
+    ```
+
+18. **Only after ALL MCPs pass**, tell me to restart my application
+
+### Phase 4: Completion
+
+19. **Show configuration summary:**
+    | MCP Name | --max-bytes | --store | Notes |
+    |----------|-------------|---------|-------|
+    | ... | ... | ... | ... |
+
+20. **Tell me to restart** (only after Phase 3 passes completely)
+
+## Important Rules
+
+- ALWAYS check/install mcp-trunc-proxy globally first (faster, more reliable)
+- Do NOT modify MCPs already wrapped with mcp-trunc-proxy
+- Do NOT skip the verification phase
+- Do NOT report success until ALL MCPs pass dry-run tests
+- If an MCP keeps failing after 3 fix attempts, ask me if I want to disable it
 - If unsure about an MCP type, use --max-bytes 80000 (safe default)
-- For MCPs you don't recognize, try to infer from the name/package
+
+## Platform-Specific Notes
+
+### Windows
+- `.cmd` and `.bat` scripts WILL fail with `spawn EINVAL` when spawned through the proxy
+- ALWAYS convert to `node` + JavaScript entry point for Node.js packages
+- Use `\\` for path separators in JSON, or `/` which Node.js accepts
+- PATH inheritance is unreliable - prefer absolute paths
+
+### macOS/Linux  
+- Most commands work directly
+- If using nvm/volta, ensure the shell has the right Node version
+- uvx/pipx commands usually work fine
+
+### Common Package Entry Points
+
+| Package | Entry Point |
+|---------|-------------|
+| playwriter | `<npm-root>/playwriter/bin.js` |
+| @morphllm/morphmcp | `<npm-root>/@morphllm/morphmcp/dist/index.js` |
+| serverless | `<npm-root>/serverless/run.js` (+ `mcp` arg) |
+| @anthropic/mcp-server-puppeteer | `<npm-root>/@anthropic/mcp-server-puppeteer/dist/index.js` |
 ````
 
 ---
@@ -717,6 +841,186 @@ mcp-trunc-proxy --store redis://localhost:6379 --ttl-seconds 86400 -- ...
 | Balanced (default) | `80000` | Good for most workflows |
 | Conservative | `120000` | Less truncation, fewer retrievals |
 | Large context models | `200000` | For Claude 3.5, GPT-4 Turbo |
+
+---
+
+## Troubleshooting
+
+### MCP Servers Fail to Connect After Adding Proxy
+
+If you see errors like `Connection closed (-32000)` or `Operation timed out` after wrapping MCPs with the proxy, the issue is usually **not the proxy itself** but slow-starting downstream servers.
+
+#### Common Errors and Causes
+
+| Error | Likely Cause | Solution |
+|-------|--------------|----------|
+| `MCP error -32000: Connection closed` | Downstream server crashed or `npx -y` download too slow | Pre-install package globally |
+| `Operation timed out after 30000ms` | Server initialization exceeds client timeout | Pre-install or increase client timeout |
+| `ENOENT` or `command not found` | Package not installed, wrong path | Verify command works standalone |
+
+#### Root Cause: `npx -y package@latest`
+
+Using `npx -y package@latest` inside the proxy command causes **double startup delay**:
+1. The proxy starts (fast)
+2. The proxy spawns `npx -y package@latest` which **downloads the package every time**
+
+Many MCP clients (Claude Desktop, OpenCode, Cursor) have a 30-second connection timeout. If download + startup exceeds this, the connection fails.
+
+#### Solution: Pre-install Slow Packages Globally
+
+```bash
+# Install problematic packages globally
+npm install -g playwriter @morphllm/morphmcp @anthropic/mcp-server-puppeteer
+
+# Then update config to use the global command directly
+```
+
+**Before (slow - downloads every time):**
+```json
+{
+  "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--",
+              "npx", "-y", "playwriter@latest"]
+}
+```
+
+**After (fast - uses pre-installed package):**
+```json
+{
+  "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--",
+              "playwriter"]
+}
+```
+
+#### Solution: Test Without Proxy First
+
+To confirm the proxy isn't the issue, temporarily remove it:
+
+```json
+// Test: Does the MCP work WITHOUT the proxy?
+{ "command": ["npx", "-y", "playwriter@latest"] }
+
+// If this also times out, the issue is npx download time, not the proxy
+```
+
+#### Servers Known to Be Slow
+
+| Package | Issue | Recommendation |
+|---------|-------|----------------|
+| `playwriter` | Large dependency tree | `npm install -g playwriter` |
+| `@morphllm/morphmcp` | Heavy initialization | `npm install -g @morphllm/morphmcp` |
+| `serverless mcp` | AWS SDK initialization | Increase timeout or disable if unused |
+| `@anthropic/mcp-server-puppeteer` | Downloads Chromium | Pre-install globally |
+
+#### Client-Side Timeout (Not Proxy's Fault)
+
+Some MCP servers are genuinely slow to initialize (e.g., `serverless mcp` loads AWS SDK). The 30-second timeout is enforced by the **MCP client** (Claude Desktop, OpenCode, etc.), not by mcp-trunc-proxy.
+
+Options:
+1. **Pre-install globally** to eliminate download time
+2. **Check if client supports timeout config** (most don't expose this)
+3. **Disable** servers you don't frequently use
+4. **File an issue** with your MCP client to support configurable timeouts
+
+#### Verifying the Fix
+
+After making changes:
+1. Restart your MCP client completely
+2. Check the MCP status panel
+3. If still failing, run the command manually in terminal to see actual errors:
+
+```bash
+# Test the full command manually
+npx mcp-trunc-proxy --max-bytes 60000 -- playwriter
+# Should output: "Proxy started, waiting for JSON-RPC..."
+```
+
+### Windows-Specific Issues
+
+Windows has unique challenges when spawning processes through the proxy.
+
+#### `spawn EINVAL` or `spawn ENOENT` on Windows
+
+**Symptom:** MCPs fail with `spawn EINVAL` or `spawn ENOENT` even though the command works in terminal.
+
+**Root Cause:** Node.js `spawn()` on Windows cannot directly execute `.cmd`/`.bat` scripts when invoked through the proxy's subprocess. The proxy spawns child processes without a shell wrapper.
+
+**Solution:** Use `node` + the package's JavaScript entry point directly instead of the `.cmd` wrapper.
+
+**Step 1: Find the package's entry point**
+```powershell
+# Find where the package is installed
+npm root -g
+# Example output: C:\Users\YourName\scoop\persist\nodejs\bin\node_modules
+
+# Check the package.json for "bin" entry
+cat <npm-root>\<package>\package.json | Select-String '"bin"' -Context 0,3
+```
+
+**Step 2: Update your config to use node + entry point**
+
+| Package | Entry Point Path |
+|---------|------------------|
+| `playwriter` | `node_modules/playwriter/bin.js` |
+| `@morphllm/morphmcp` | `node_modules/@morphllm/morphmcp/dist/index.js` |
+| `serverless` | `node_modules/serverless/run.js` |
+
+**Before (fails on Windows):**
+```json
+{
+  "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--", "playwriter"]
+}
+```
+
+**After (works on Windows):**
+```json
+{
+  "command": [
+    "npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--",
+    "node", "C:\\Users\\YourName\\scoop\\persist\\nodejs\\bin\\node_modules\\playwriter\\bin.js"
+  ]
+}
+```
+
+#### PATH Not Inherited on Windows
+
+**Symptom:** Commands work in terminal but fail when spawned by the proxy.
+
+**Root Cause:** Package managers like Scoop, NVM, or Volta modify PATH in shell profiles, but the proxy's subprocess may not inherit the full PATH.
+
+**Solution:** Use absolute paths to executables:
+
+```json
+{
+  "command": [
+    "npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--",
+    "node", "C:\\absolute\\path\\to\\package\\entry.js"
+  ]
+}
+```
+
+#### Finding Entry Points for Common Packages
+
+```powershell
+# Generic method to find any package's entry point
+npm root -g  # Get global node_modules path
+
+# Then check the package's package.json for "bin" or "main"
+cat "<npm-root>/<package>/package.json"
+
+# Look for:
+#   "bin": { "command-name": "./path/to/entry.js" }
+# or
+#   "main": "./dist/index.js"
+```
+
+#### Windows Quick Reference
+
+| Issue | Error | Fix |
+|-------|-------|-----|
+| `.cmd` scripts fail | `spawn EINVAL` | Use `node` + entry point path |
+| Command not found | `spawn ENOENT` | Use absolute path |
+| PATH not inherited | `ENOENT` for installed package | Use absolute path to executable |
+| uvx/pipx commands | `spawn ENOENT` | Use `python -m <module>` instead |
 
 ---
 
