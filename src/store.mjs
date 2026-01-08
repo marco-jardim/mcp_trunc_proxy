@@ -21,6 +21,16 @@ export async function createStore({ spec, ttlSeconds, maxArtifacts, keyPrefix, l
   throw new Error(`Unknown store spec: ${spec} (expected memory, file:<dir>, redis:<url>)`);
 }
 
+// ISSUE-057 FIX: Estimate base64 decoded size without actually decoding
+function estimateBase64DecodedSize(b64) {
+  if (typeof b64 !== "string" || !b64) return null;
+  // Account for padding
+  let padding = 0;
+  if (b64.endsWith("==")) padding = 2;
+  else if (b64.endsWith("=")) padding = 1;
+  return Math.floor((b64.length * 3) / 4) - padding;
+}
+
 // ISSUE-029 FIX: Safe base64 decoding with validation
 function decodeBase64Safe(b64, log, context) {
   if (typeof b64 !== "string" || !b64) {
@@ -110,6 +120,8 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
         map.delete(id);
         return null;
       }
+      // ISSUE-056 FIX: Update lastAccess consistent with get()
+      rec.lastAccess = Date.now();
       return {
         id,
         store: "memory",
@@ -259,15 +271,14 @@ async function createFileStore({ dir, ttlSeconds, log }) {
         await unlink(pathFor(id)).catch(() => {});
         return null;
       }
-      // ISSUE-029 FIX: Validate base64 for byte count
-      const data = decodeBase64Safe(rec.dataB64, log, `FileStore artifact ${id}`);
+      // ISSUE-057 FIX: Estimate byte count without decoding entire payload
       return {
         id,
         store: `file:${baseDir}`,
         createdAt: rec.createdAt,
         expiresAt: rec.expiresAt ?? null,
         meta: rec.meta,
-        bytesStored: data ? data.byteLength : null,
+        bytesStored: estimateBase64DecodedSize(rec.dataB64),
       };
     },
 
@@ -390,12 +401,13 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
      * @returns {Promise<{id: string, store: string, createdAt: string, ttlSeconds: number|null, meta: object, bytesStored: number|null}|null>}
      */
     // ISSUE-041 FIX: Wrap Redis operations in try-catch
+    // ISSUE-058 FIX: Rename ttl to remainingTtl for clarity
     async info(id) {
-      let raw, ttl;
+      let raw, remainingTtl;
       try {
         raw = await client.get(key(id));
         if (!raw) return null;
-        ttl = await client.ttl(key(id));
+        remainingTtl = await client.ttl(key(id));
       } catch (err) {
         log?.error?.(`redis info failed for ${id}: ${err.message}`);
         throw err;
@@ -407,15 +419,14 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         log?.error?.(`corrupt redis artifact ${id}: ${err.message}`);
         return null;
       }
-      // ISSUE-029 FIX: Validate base64 for byte count
-      const data = decodeBase64Safe(rec.dataB64, log, `RedisStore artifact ${id}`);
+      // ISSUE-057 FIX: Estimate byte count without decoding entire payload
       return {
         id,
         store: `redis:${sanitizeUrl(url)}`,
         createdAt: rec.createdAt,
-        ttlSeconds: ttl >= 0 ? ttl : null,
+        ttlSeconds: remainingTtl >= 0 ? remainingTtl : null,
         meta: rec.meta,
-        bytesStored: data ? data.byteLength : null,
+        bytesStored: estimateBase64DecodedSize(rec.dataB64),
       };
     },
 

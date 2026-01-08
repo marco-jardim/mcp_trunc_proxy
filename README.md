@@ -114,6 +114,8 @@ mcp-trunc-proxy --max-bytes 80000 --   npx -y @modelcontextprotocol/server-files
 | `--no-info-tool` |  | Disable the info tool. |
 | `--log-level` | `info` | `silent`, `error`, `warn`, `info`, `debug`. |
 | `--redis-key-prefix` | `mcp-trunc-proxy` | Prefix for Redis keys. |
+| `-h, --help` | | Show help message. |
+| `-v, --version` | | Show version number. |
 
 ### Environment variables
 
@@ -262,7 +264,19 @@ mcp-trunc-proxy --store redis:redis://localhost:6379 --ttl-seconds 86400 -- ...
 Tool outputs can contain secrets (tokens, env vars, internal URLs, payloads).
 
 - Prefer **memory** store unless persistence is necessary.
-- If you use file/redis, lock down access and consider your organization’s data retention policies.
+- If you use file/redis, lock down access and consider your organization's data retention policies.
+- Redis credentials in URLs are automatically masked in logs.
+- FileStore sanitizes artifact IDs to prevent path traversal attacks.
+
+---
+
+## Reliability features
+
+- **Graceful shutdown**: SIGTERM/SIGINT triggers clean shutdown with store cleanup.
+- **Redis reconnection**: Automatic reconnection with exponential backoff (up to 10 retries).
+- **Request timeouts**: Pending requests are cleaned up after 5 minutes.
+- **Error handling**: Corrupt artifacts, decompression failures, and spawn errors are handled gracefully.
+- **Tool name collision**: Warns if downstream server already has a tool with the same name.
 
 ---
 
