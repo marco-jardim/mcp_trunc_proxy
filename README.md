@@ -1,6 +1,6 @@
 # mcp-trunc-proxy
 
-[![CI](https://github.com/anthropics/mcp-trunc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/anthropics/mcp-trunc-proxy/actions/workflows/ci.yml)
+[![CI](https://github.com/marco-jardim/mcp-trunc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/marco-jardim/mcp-trunc-proxy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/mcp-trunc-proxy.svg)](https://www.npmjs.com/package/mcp-trunc-proxy)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -8,6 +8,35 @@
 A **generic MCP stdio proxy** that saves tokens by **offloading large `tools/call` results** to an artifact store and returning only a compact preview + a retrieval tool.
 
 **98% token reduction** on large payloads. Works with any MCP server.
+
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [The Solution](#the-solution)
+- [Benchmark Results](#benchmark-results)
+- [Quick Start](#quick-start)
+- [Installation & Setup](#installation--setup)
+  - [Claude Code (CLI)](#claude-code-cli)
+  - [Claude Desktop](#claude-desktop)
+  - [Cursor](#cursor)
+  - [OpenCode](#opencode)
+  - [Windsurf](#windsurf)
+  - [Cline (VS Code)](#cline-vs-code)
+  - [Continue (VS Code/JetBrains)](#continue-vs-codejetbrains)
+  - [Zed](#zed)
+  - [Custom MCP Client](#custom-mcp-client)
+- [One-Click Setup Prompt](#one-click-setup-prompt)
+- [How It Works](#how-it-works)
+- [Configuration](#configuration)
+- [Storage Backends](#storage-backends)
+- [Tuning Guide](#tuning-guide)
+- [Security](#security)
+- [Reliability](#reliability)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -77,30 +106,438 @@ Compression: ~50 MB/s compress, ~200 MB/s decompress (gzip)
 
 ## Quick Start
 
-### Install
+```bash
+# Install globally
+npm install -g mcp-trunc-proxy
 
+# Wrap any MCP server
+mcp-trunc-proxy -- npx -y @modelcontextprotocol/server-filesystem /path/to/repo
+
+# Or use npx directly (no install)
+npx mcp-trunc-proxy -- npx -y @modelcontextprotocol/server-github
+```
+
+---
+
+## Installation & Setup
+
+### Claude Code (CLI)
+
+Claude Code uses `~/.claude/claude_desktop_config.json` (same as Claude Desktop).
+
+**Location:**
+- macOS/Linux: `~/.claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+**Step 1: Install the proxy**
 ```bash
 npm install -g mcp-trunc-proxy
 ```
 
-Or use directly:
+**Step 2: Edit your config to wrap existing MCPs**
 
-```bash
-npx mcp-trunc-proxy --max-bytes 80000 -- <your-mcp-server-command>
+Before:
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    }
+  }
+}
 ```
 
-### Wrap Any MCP Server
-
-```bash
-# Wrap filesystem MCP
-mcp-trunc-proxy -- npx -y @modelcontextprotocol/server-filesystem /path/to/repo
-
-# Wrap GitHub MCP
-mcp-trunc-proxy -- npx -y @modelcontextprotocol/server-github
-
-# Wrap with custom threshold
-mcp-trunc-proxy --max-bytes 60000 -- npx -y @modelcontextprotocol/server-fetch
+After (wrapped with proxy):
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    }
+  }
+}
 ```
+
+**Step 3: Restart Claude Code**
+
+---
+
+### Claude Desktop
+
+Same configuration as Claude Code above.
+
+**Config location:**
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+
+**Example with multiple MCPs:**
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/Users/you/code"
+      ]
+    },
+    "fetch": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "60000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-fetch"
+      ]
+    },
+    "postgres": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "100000", "--store", "file:.mcp-artifacts", "--",
+        "npx", "-y", "@modelcontextprotocol/server-postgres"
+      ],
+      "env": {
+        "DATABASE_URL": "postgresql://user:pass@localhost/db"
+      }
+    }
+  }
+}
+```
+
+---
+
+### Cursor
+
+Cursor uses `.cursor/mcp.json` in your project root or `~/.cursor/mcp.json` globally.
+
+**Step 1: Create or edit `.cursor/mcp.json`**
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "."
+      ]
+    }
+  }
+}
+```
+
+**Step 2: Restart Cursor or reload window**
+
+---
+
+### OpenCode
+
+OpenCode uses `mcp.json` or `opencode.json` in your project root, or `~/.config/opencode/config.json` globally.
+
+**Step 1: Edit your MCP config**
+```json
+{
+  "mcp": {
+    "github": {
+      "type": "local",
+      "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "80000", "--", "npx", "-y", "@modelcontextprotocol/server-github"],
+      "environment": {
+        "GITHUB_TOKEN": "{env:GITHUB_TOKEN}"
+      }
+    },
+    "filesystem": {
+      "type": "local",
+      "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "80000", "--", "npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "fetch": {
+      "type": "local",
+      "command": ["npx", "mcp-trunc-proxy", "--max-bytes", "60000", "--", "npx", "-y", "@modelcontextprotocol/server-fetch"]
+    }
+  }
+}
+```
+
+**Step 2: Restart OpenCode**
+
+---
+
+### Windsurf
+
+Windsurf uses `~/.windsurf/config.json` or `.windsurf/mcp.json` in your project.
+
+**Config example:**
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    }
+  }
+}
+```
+
+---
+
+### Cline (VS Code)
+
+Cline stores MCP config in VS Code settings or `.vscode/cline_mcp_settings.json`.
+
+**Step 1: Open VS Code settings (JSON)**
+
+**Step 2: Add MCP servers:**
+```json
+{
+  "cline.mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "${workspaceFolder}"
+      ]
+    }
+  }
+}
+```
+
+Or use `.vscode/cline_mcp_settings.json`:
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    }
+  }
+}
+```
+
+---
+
+### Continue (VS Code/JetBrains)
+
+Continue uses `~/.continue/config.json`.
+
+**Step 1: Edit `~/.continue/config.json`**
+```json
+{
+  "mcpServers": [
+    {
+      "name": "github",
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+      }
+    },
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": [
+        "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"
+      ]
+    }
+  ]
+}
+```
+
+**Step 2: Reload Continue extension**
+
+---
+
+### Zed
+
+Zed uses `~/.config/zed/settings.json`.
+
+**Add to your settings:**
+```json
+{
+  "language_models": {
+    "mcp_servers": {
+      "github": {
+        "command": "npx",
+        "args": [
+          "mcp-trunc-proxy", "--max-bytes", "80000", "--",
+          "npx", "-y", "@modelcontextprotocol/server-github"
+        ],
+        "env": {
+          "GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+### Custom MCP Client
+
+If you're building a custom MCP client, wrap the server spawn:
+
+```javascript
+import { spawn } from "child_process";
+
+// Instead of:
+const server = spawn("npx", ["-y", "@modelcontextprotocol/server-github"]);
+
+// Use:
+const server = spawn("npx", [
+  "mcp-trunc-proxy",
+  "--max-bytes", "80000",
+  "--",
+  "npx", "-y", "@modelcontextprotocol/server-github"
+]);
+```
+
+---
+
+## One-Click Setup Prompt
+
+**Copy and paste this prompt into your AI tool to automatically set up mcp-trunc-proxy with optimized settings for each MCP:**
+
+````
+I want you to wrap all my existing MCP servers with mcp-trunc-proxy to reduce token usage.
+
+## What is mcp-trunc-proxy?
+An npm package that intercepts large MCP tool outputs, stores them compressed, and returns a compact preview with a retrieval tool. Reduces token usage by ~98% for large responses.
+
+## Your Task
+
+1. **Find my MCP configuration file** (check in order, use first found):
+   - Claude Desktop/Code: ~/.claude/claude_desktop_config.json or %APPDATA%\Claude\claude_desktop_config.json
+   - Cursor: .cursor/mcp.json or ~/.cursor/mcp.json  
+   - OpenCode: mcp.json or opencode.json or ~/.config/opencode/config.json
+   - Cline: .vscode/cline_mcp_settings.json
+   - Continue: ~/.continue/config.json
+   - Zed: ~/.config/zed/settings.json
+   - Windsurf: ~/.windsurf/config.json or .windsurf/mcp.json
+
+2. **Read the config and analyze each MCP server**
+
+3. **For each MCP, choose optimal --max-bytes based on this table:**
+
+   | MCP Server Pattern | --max-bytes | Reason |
+   |--------------------|-------------|--------|
+   | server-filesystem, filesystem | 80000 | Directory listings can be huge |
+   | server-github, github | 80000 | PR comments, issues, file trees |
+   | server-gitlab, gitlab | 80000 | Similar to GitHub |
+   | server-fetch, fetch, puppeteer, playwright | 60000 | Web pages vary, often moderate |
+   | server-postgres, postgres, server-sqlite, sqlite, server-mysql, mysql, database, db, supabase, prisma | 120000 | Query results can be massive |
+   | server-brave-search, search, tavily, exa | 50000 | Search results are moderate |
+   | server-memory, memory, knowledge | 40000 | Usually smaller payloads |
+   | server-slack, slack, discord | 60000 | Message history moderate |
+   | server-notion, notion | 80000 | Page content can be large |
+   | server-google-drive, gdrive, drive | 100000 | File listings and content |
+   | server-aws, aws, s3 | 100000 | Listings can be large |
+   | server-kubernetes, k8s | 80000 | Resource listings |
+   | server-docker | 60000 | Container/image lists |
+   | everything-else | 80000 | Safe default |
+
+4. **Additional optimizations based on MCP type:**
+   - Database MCPs: Add `--store file:.mcp-artifacts` for persistence (queries worth caching)
+   - Filesystem MCPs with large repos: Consider `--max-bytes 100000`
+   - Search MCPs: Can use lower `--max-bytes 40000` (results are summarized)
+
+5. **Transform each MCP entry:**
+   
+   Before:
+   ```json
+   {
+     "command": "npx",
+     "args": ["-y", "@modelcontextprotocol/server-postgres"],
+     "env": { "DATABASE_URL": "..." }
+   }
+   ```
+   
+   After (with optimized params):
+   ```json
+   {
+     "command": "npx",
+     "args": [
+       "mcp-trunc-proxy",
+       "--max-bytes", "120000",
+       "--store", "file:.mcp-artifacts",
+       "--",
+       "npx", "-y", "@modelcontextprotocol/server-postgres"
+     ],
+     "env": { "DATABASE_URL": "..." }
+   }
+   ```
+
+6. **Preserve all existing environment variables and arguments**
+
+7. **Save the updated config file**
+
+8. **Show me a summary table of what you configured:**
+   | MCP Name | --max-bytes | --store | Reason |
+   |----------|-------------|---------|--------|
+   | ... | ... | ... | ... |
+
+9. **Tell me to restart my application**
+
+## Important Notes
+- Do NOT install anything globally - npx handles it
+- Do NOT modify MCPs that are already wrapped with mcp-trunc-proxy
+- If unsure about an MCP type, use --max-bytes 80000 (safe default)
+- For MCPs you don't recognize, try to infer from the name/package
+````
 
 ---
 
@@ -170,8 +607,8 @@ The proxy injects `proxy_artifact_get` into `tools/list`:
 // Get last N lines
 {"id": "art_abc123", "mode": "tail", "tailLines": 200}
 
-// Full JSON (use sparingly - defeats the purpose)
-{"id": "art_abc123", "mode": "json", "maxBytes": 150000}
+// Full content (use sparingly - defeats the purpose)
+{"id": "art_abc123", "mode": "full"}
 ```
 
 ---
@@ -244,77 +681,28 @@ mcp-trunc-proxy --store redis://localhost:6379 --ttl-seconds 86400 -- ...
 
 ---
 
-## Integration Examples
-
-### OpenCode
-
-```jsonc
-{
-  "mcp": {
-    "github": {
-      "type": "local",
-      "command": [
-        "npx", "mcp-trunc-proxy",
-        "--max-bytes", "80000",
-        "--",
-        "npx", "-y", "@modelcontextprotocol/server-github"
-      ],
-      "environment": {
-        "GITHUB_TOKEN": "{env:GITHUB_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-```jsonc
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "mcp-trunc-proxy",
-        "--max-bytes", "80000",
-        "--",
-        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/path/to/repo"
-      ]
-    }
-  }
-}
-```
-
-### Cursor
-
-```jsonc
-{
-  "mcp": {
-    "servers": {
-      "github": {
-        "command": "npx",
-        "args": [
-          "mcp-trunc-proxy", "--max-bytes", "80000", "--",
-          "npx", "-y", "@modelcontextprotocol/server-github"
-        ],
-        "env": {
-          "GITHUB_TOKEN": "your-token"
-        }
-      }
-    }
-  }
-}
-```
-
----
-
 ## Tuning Guide
 
-### When to Lower `--max-bytes`
+### Recommended Settings by MCP Type
 
-- Model frequently needs full context → increase threshold
-- Too many retrieval calls → increase threshold
-- Token budget is tight → decrease threshold
+| MCP Server | `--max-bytes` | Notes |
+|------------|---------------|-------|
+| server-filesystem | `80000` | Directory listings can be huge |
+| server-github | `80000` | PR comments, file trees |
+| server-fetch | `60000` | Web pages vary widely |
+| server-postgres | `100000` | Query results can be massive |
+| server-sqlite | `100000` | Same as postgres |
+| server-puppeteer | `60000` | Screenshots are base64 |
+| server-brave-search | `40000` | Search results are moderate |
+
+### When to Adjust `--max-bytes`
+
+| Symptom | Solution |
+|---------|----------|
+| Too many retrieval calls | Increase `--max-bytes` |
+| Context still too large | Decrease `--max-bytes` |
+| Missing important details in preview | Increase `--head-lines` / `--tail-lines` |
+| Preview too verbose | Decrease `--preview-max-chars` |
 
 ### Recommended Starting Points
 
@@ -324,14 +712,6 @@ mcp-trunc-proxy --store redis://localhost:6379 --ttl-seconds 86400 -- ...
 | Balanced (default) | `80000` | Good for most workflows |
 | Conservative | `120000` | Less truncation, fewer retrievals |
 | Large context models | `200000` | For Claude 3.5, GPT-4 Turbo |
-
-### Preview Tuning
-
-If agents struggle to find relevant content in previews:
-
-```bash
---head-lines 100 --tail-lines 100 --preview-max-chars 10000
-```
 
 ---
 
@@ -366,7 +746,7 @@ The proxy includes:
 ### Run Tests
 
 ```bash
-npm test              # Unit + functional tests
+npm test              # Unit + functional tests (141 tests)
 npm run test:e2e      # End-to-end tests
 npm run test:all      # Everything
 ```
@@ -406,7 +786,7 @@ This proxy is a **drop-in solution** that works with any MCP server without modi
 
 ## Contributing
 
-1. Fork the repo
+1. Fork the repo: https://github.com/marco-jardim/mcp-trunc-proxy
 2. Create a feature branch
 3. Run tests: `npm run test:all`
 4. Submit a PR
@@ -416,6 +796,12 @@ This proxy is a **drop-in solution** that works with any MCP server without modi
 ## License
 
 GPL-3.0-only. See [LICENSE](./LICENSE).
+
+---
+
+## Author
+
+**Marco Jardim** - [GitHub](https://github.com/marco-jardim)
 
 ---
 
