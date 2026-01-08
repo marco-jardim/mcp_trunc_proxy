@@ -46,7 +46,7 @@ function decodeBase64Safe(b64, log, context) {
 }
 
 // ISSUE-021 FIX: Add default maxArtifacts
-function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log }) {
+function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log: _log }) {
   const map = new Map(); // id -> {data: Buffer, meta, createdAt, lastAccess, expiresAt?}
   const effectiveMaxArtifacts = maxArtifacts || 2000; // Ensure not undefined/null/0
 
@@ -296,7 +296,7 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
   let redisMod;
   try {
     redisMod = await import("redis");
-  } catch (e) {
+  } catch (_e) {
     throw new Error("Redis store requested but 'redis' package is not installed. Run: npm i redis");
   }
   const { createClient } = redisMod;

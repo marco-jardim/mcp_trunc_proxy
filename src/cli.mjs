@@ -34,7 +34,7 @@ function parseArgs(argv) {
     childCommand: null,
   };
 
-  const out = [];
+  const _out = [];
   let i = 0;
   while (i < argv.length) {
     const a = argv[i];
