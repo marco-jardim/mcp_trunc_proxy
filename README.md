@@ -1,9 +1,14 @@
 # mcp-trunc-proxy
 
-[![CI](https://github.com/marco-jardim/mcp-trunc-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/marco-jardim/mcp-trunc-proxy/actions/workflows/ci.yml)
+[![CI](https://github.com/marco-jardim/mcp_trunc_proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/marco-jardim/mcp_trunc_proxy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/mcp-trunc-proxy.svg)](https://www.npmjs.com/package/mcp-trunc-proxy)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Token Savings](https://img.shields.io/badge/tokens%20saved-98%25-ff69b4.svg)](https://github.com/marco-jardim/mcp_trunc_proxy#benchmark-results)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/marco-jardim/mcp_trunc_proxy/pulls)
+[![Made with Mate](https://img.shields.io/badge/made%20with-🧉-green.svg)](https://github.com/marco-jardim)
+[![Works on My Machine](https://img.shields.io/badge/works%20on-my%20machine-success.svg)](https://github.com/marco-jardim/mcp_trunc_proxy)
+[![Powered by Gzip](https://img.shields.io/badge/powered%20by-gzip-orange.svg)](https://en.wikipedia.org/wiki/Gzip)
 
 A **generic MCP stdio proxy** that saves tokens by **offloading large `tools/call` results** to an artifact store and returning only a compact preview + a retrieval tool.
 
