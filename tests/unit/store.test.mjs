@@ -274,4 +274,181 @@ describe("store.mjs", () => {
       await store.close();
     });
   });
+
+  describe("MemoryStore list()", () => {
+    let store;
+
+    beforeEach(async () => {
+      store = await createStore({
+        spec: "memory",
+        ttlSeconds: 60,
+        maxArtifacts: 100,
+      });
+    });
+
+    afterEach(async () => {
+      await store.close();
+    });
+
+    test("list() returns empty array when no artifacts", async () => {
+      const result = await store.list();
+      assert.deepStrictEqual(result, []);
+    });
+
+    test("list() returns all stored artifacts", async () => {
+      await store.put("art-1", Buffer.from("data1"), { toolName: "tool1", originalBytes: 100 });
+      await store.put("art-2", Buffer.from("data2"), { toolName: "tool2", originalBytes: 200 });
+      await store.put("art-3", Buffer.from("data3"), { toolName: "tool3", originalBytes: 300 });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 3);
+    });
+
+    test("list() returns correct artifact properties", async () => {
+      await store.put("art-props", Buffer.from("test data"), { toolName: "myTool", originalBytes: 12345 });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 1);
+      const art = result[0];
+
+      assert.strictEqual(art.id, "art-props");
+      assert.strictEqual(art.toolName, "myTool");
+      assert.strictEqual(art.originalBytes, 12345);
+      assert.strictEqual(art.bytesStored, 9); // "test data" = 9 bytes
+      assert.ok(art.createdAt);
+      assert.ok(art.expiresAt);
+    });
+
+    test("list() excludes expired artifacts", async () => {
+      const shortTtlStore = await createStore({
+        spec: "memory",
+        ttlSeconds: 0.001,
+        maxArtifacts: 100,
+      });
+
+      await shortTtlStore.put("expired", Buffer.from("data"), { toolName: "test" });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const result = await shortTtlStore.list();
+      assert.strictEqual(result.length, 0);
+      await shortTtlStore.close();
+    });
+
+    test("list() sorts by createdAt descending (newest first)", async () => {
+      await store.put("old", Buffer.from("1"), { toolName: "t1" });
+      await new Promise((r) => setTimeout(r, 5));
+      await store.put("middle", Buffer.from("2"), { toolName: "t2" });
+      await new Promise((r) => setTimeout(r, 5));
+      await store.put("new", Buffer.from("3"), { toolName: "t3" });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 3);
+      assert.strictEqual(result[0].id, "new");
+      assert.strictEqual(result[1].id, "middle");
+      assert.strictEqual(result[2].id, "old");
+    });
+
+    test("list() handles missing meta properties gracefully", async () => {
+      await store.put("no-meta", Buffer.from("data"), {});
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0].toolName, null);
+      assert.strictEqual(result[0].originalBytes, null);
+    });
+
+    test("list() works with no TTL configured", async () => {
+      const noTtlStore = await createStore({
+        spec: "memory",
+        maxArtifacts: 100,
+      });
+
+      await noTtlStore.put("no-ttl", Buffer.from("data"), { toolName: "test" });
+
+      const result = await noTtlStore.list();
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0].expiresAt, null);
+      await noTtlStore.close();
+    });
+  });
+
+  describe("FileStore list()", () => {
+    let store;
+    let testDir;
+
+    beforeEach(async () => {
+      testDir = join(tmpdir(), `mcp-test-list-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      store = await createStore({
+        spec: `file:${testDir}`,
+        ttlSeconds: 60,
+      });
+    });
+
+    afterEach(async () => {
+      await store.close();
+      await rm(testDir, { recursive: true, force: true }).catch(() => {});
+    });
+
+    test("list() returns empty array when no artifacts", async () => {
+      const result = await store.list();
+      assert.deepStrictEqual(result, []);
+    });
+
+    test("list() returns all stored artifacts", async () => {
+      await store.put("file-1", Buffer.from("data1"), { toolName: "tool1", originalBytes: 100 });
+      await store.put("file-2", Buffer.from("data2"), { toolName: "tool2", originalBytes: 200 });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 2);
+    });
+
+    test("list() returns correct artifact properties", async () => {
+      await store.put("file-props", Buffer.from("file data"), { toolName: "fileTool", originalBytes: 5678 });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 1);
+      const art = result[0];
+
+      assert.strictEqual(art.id, "file-props");
+      assert.strictEqual(art.toolName, "fileTool");
+      assert.strictEqual(art.originalBytes, 5678);
+      assert.ok(art.bytesStored > 0);
+      assert.ok(art.createdAt);
+      assert.ok(art.expiresAt);
+    });
+
+    test("list() excludes expired artifacts", async () => {
+      const shortTtlDir = join(tmpdir(), `mcp-test-expire-${Date.now()}`);
+      const shortTtlStore = await createStore({
+        spec: `file:${shortTtlDir}`,
+        ttlSeconds: 0.001,
+      });
+
+      await shortTtlStore.put("expired-file", Buffer.from("data"), { toolName: "test" });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const result = await shortTtlStore.list();
+      assert.strictEqual(result.length, 0);
+      await shortTtlStore.close();
+      await rm(shortTtlDir, { recursive: true, force: true }).catch(() => {});
+    });
+
+    test("list() sorts by createdAt descending (newest first)", async () => {
+      await store.put("file-old", Buffer.from("1"), { toolName: "t1" });
+      await new Promise((r) => setTimeout(r, 10));
+      await store.put("file-new", Buffer.from("2"), { toolName: "t2" });
+
+      const result = await store.list();
+      assert.strictEqual(result.length, 2);
+      assert.strictEqual(result[0].id, "file-new");
+      assert.strictEqual(result[1].id, "file-old");
+    });
+
+    test("list() ignores non-json files", async () => {
+      await store.put("valid", Buffer.from("data"), { toolName: "test" });
+      // The store only looks for .json files, so other files are ignored
+      const result = await store.list();
+      assert.strictEqual(result.length, 1);
+    });
+  });
 });

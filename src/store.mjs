@@ -134,6 +134,30 @@ function createMemoryStore({ ttlSeconds, maxArtifacts = 2000, log: _log }) {
     },
 
     /**
+     * List all artifacts in the store.
+     * @returns {Promise<Array<{id: string, toolName: string|null, originalBytes: number|null, bytesStored: number|null, createdAt: string, expiresAt: string|null}>>}
+     */
+    async list() {
+      const now = Date.now();
+      const results = [];
+      for (const [id, rec] of map.entries()) {
+        // Skip expired entries
+        if (rec.expiresAt && rec.expiresAt <= now) continue;
+        results.push({
+          id,
+          toolName: rec.meta?.toolName ?? null,
+          originalBytes: rec.meta?.originalBytes ?? null,
+          bytesStored: rec.data?.byteLength ?? null,
+          createdAt: new Date(rec.createdAt).toISOString(),
+          expiresAt: rec.expiresAt ? new Date(rec.expiresAt).toISOString() : null,
+        });
+      }
+      // Sort by createdAt descending (newest first)
+      results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      return results;
+    },
+
+    /**
      * Close the store and release resources.
      * @returns {Promise<void>}
      */
@@ -283,6 +307,39 @@ async function createFileStore({ dir, ttlSeconds, log }) {
     },
 
     /**
+     * List all artifacts in the store.
+     * @returns {Promise<Array<{id: string, toolName: string|null, originalBytes: number|null, bytesStored: number|null, createdAt: string, expiresAt: string|null}>>}
+     */
+    async list() {
+      const results = [];
+      const now = Date.now();
+      try {
+        const files = await readdir(baseDir);
+        for (const file of files) {
+          if (!file.endsWith(".json")) continue;
+          const id = file.slice(0, -5); // Remove .json extension
+          const { rec } = await readArtifactFile(id);
+          if (!rec) continue;
+          // Skip expired entries
+          if (rec.expiresAt && Date.parse(rec.expiresAt) <= now) continue;
+          results.push({
+            id: rec.id ?? id,
+            toolName: rec.meta?.toolName ?? null,
+            originalBytes: rec.meta?.originalBytes ?? null,
+            bytesStored: estimateBase64DecodedSize(rec.dataB64),
+            createdAt: rec.createdAt,
+            expiresAt: rec.expiresAt ?? null,
+          });
+        }
+      } catch (err) {
+        log?.error?.(`error listing artifacts: ${err.message}`);
+      }
+      // Sort by createdAt descending (newest first)
+      results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      return results;
+    },
+
+    /**
      * Close the store and release resources.
      * @returns {Promise<void>}
      */
@@ -428,6 +485,53 @@ async function createRedisStore({ url, ttlSeconds, keyPrefix, log }) {
         meta: rec.meta,
         bytesStored: estimateBase64DecodedSize(rec.dataB64),
       };
+    },
+
+    /**
+     * List all artifacts in the store.
+     * @returns {Promise<Array<{id: string, toolName: string|null, originalBytes: number|null, bytesStored: number|null, createdAt: string, ttlSeconds: number|null}>>}
+     */
+    async list() {
+      const results = [];
+      try {
+        // Scan for all artifact keys
+        const pattern = `${prefix}:artifact:*`;
+        const keys = [];
+        for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 100 })) {
+          keys.push(key);
+        }
+        for (const fullKey of keys) {
+          const id = fullKey.slice(`${prefix}:artifact:`.length);
+          let raw, remainingTtl;
+          try {
+            raw = await client.get(fullKey);
+            if (!raw) continue;
+            remainingTtl = await client.ttl(fullKey);
+          } catch (err) {
+            log?.error?.(`redis list error for ${id}: ${err.message}`);
+            continue;
+          }
+          let rec;
+          try {
+            rec = JSON.parse(raw);
+          } catch {
+            continue; // Skip corrupt entries
+          }
+          results.push({
+            id,
+            toolName: rec.meta?.toolName ?? null,
+            originalBytes: rec.meta?.originalBytes ?? null,
+            bytesStored: estimateBase64DecodedSize(rec.dataB64),
+            createdAt: rec.createdAt,
+            ttlSeconds: remainingTtl >= 0 ? remainingTtl : null,
+          });
+        }
+      } catch (err) {
+        log?.error?.(`redis list failed: ${err.message}`);
+      }
+      // Sort by createdAt descending (newest first)
+      results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      return results;
     },
 
     /**

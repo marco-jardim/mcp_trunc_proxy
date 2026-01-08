@@ -1024,6 +1024,149 @@ cat "<npm-root>/<package>/package.json"
 
 ---
 
+## Debugging & Inspection
+
+The proxy provides several tools and methods to inspect stored artifacts and debug behavior.
+
+### Inspection Tools
+
+The proxy injects three tools (all enabled by default):
+
+| Tool | Purpose | Disable Flag |
+|------|---------|--------------|
+| `proxy_artifact_get` | Retrieve artifact content (grep/range/tail) | N/A (core tool) |
+| `proxy_artifact_info` | Get metadata for a single artifact | `--no-info-tool` |
+| `proxy_artifact_list` | List all stored artifacts | `--no-list-tool` |
+
+### List All Artifacts
+
+Use `proxy_artifact_list` to see what's currently stored:
+
+```json
+// List artifacts (default: 20, max: 100)
+{"tool": "proxy_artifact_list", "arguments": {}}
+{"tool": "proxy_artifact_list", "arguments": {"limit": 50}}
+```
+
+**Response:**
+```json
+{
+  "total": 3,
+  "returned": 3,
+  "artifacts": [
+    {
+      "id": "art_abc123",
+      "toolName": "filesystem",
+      "originalBytes": 245760,
+      "bytesStored": 12345,
+      "createdAt": "2025-01-08T12:34:56.789Z",
+      "expiresAt": "2025-01-15T12:34:56.789Z"
+    },
+    ...
+  ]
+}
+```
+
+### Get Artifact Metadata
+
+Use `proxy_artifact_info` to inspect a specific artifact:
+
+```json
+{"tool": "proxy_artifact_info", "arguments": {"id": "art_abc123"}}
+```
+
+**Response:**
+```json
+{
+  "id": "art_abc123",
+  "store": "memory",
+  "meta": {
+    "toolName": "filesystem",
+    "requestId": 42,
+    "originalBytes": 245760,
+    "storedAt": "2025-01-08T12:34:56.789Z",
+    "bytesStored": 12345,
+    "kind": "tools/call.result"
+  },
+  "createdAt": "2025-01-08T12:34:56.789Z",
+  "lastAccess": "2025-01-08T12:35:10.123Z",
+  "expiresAt": "2025-01-15T12:34:56.789Z",
+  "bytesStored": 12345
+}
+```
+
+### Debug Logging
+
+Enable verbose logging to see all artifact operations:
+
+```bash
+mcp-trunc-proxy --log-level debug --max-bytes 60000 -- <your-mcp-server>
+```
+
+**Log levels:**
+- `silent` - No output
+- `error` - Only errors
+- `warn` - Errors + warnings
+- `info` - Default, includes startup messages
+- `debug` - Verbose, shows all operations
+
+**Example debug output:**
+```
+[mcp-trunc-proxy] info: mcp-trunc-proxy started: maxBytes=60000 store=memory tool=proxy_artifact_get infoTool=proxy_artifact_info
+[mcp-trunc-proxy] debug: storing artifact art_abc123 (245760 bytes -> 12345 compressed)
+[mcp-trunc-proxy] debug: retrieved artifact art_abc123 (mode=grep, pattern=error)
+```
+
+### File Store Inspection
+
+For easier debugging, use file-based storage to inspect artifacts directly:
+
+```bash
+mcp-trunc-proxy --store file:.mcp-artifacts --max-bytes 60000 -- <server>
+```
+
+Then browse the artifacts directory:
+
+```bash
+# List stored artifacts
+ls .mcp-artifacts/
+
+# Inspect a specific artifact (files are gzipped JSON)
+zcat .mcp-artifacts/art_abc123.json.gz | jq .
+
+# Or on Windows with PowerShell
+$content = [System.IO.File]::ReadAllBytes(".mcp-artifacts\art_abc123.json")
+$stream = New-Object System.IO.MemoryStream(,$content)
+$gzip = New-Object System.IO.Compression.GzipStream($stream, [System.IO.Compression.CompressionMode]::Decompress)
+$reader = New-Object System.IO.StreamReader($gzip)
+$reader.ReadToEnd() | ConvertFrom-Json
+```
+
+### Quick Debugging Checklist
+
+| Symptom | Debug Method |
+|---------|--------------|
+| "Which artifacts are stored?" | Call `proxy_artifact_list` |
+| "What's in artifact X?" | Call `proxy_artifact_get` with `mode: "head"` or `mode: "grep"` |
+| "When was artifact X created?" | Call `proxy_artifact_info` |
+| "Is the proxy working?" | Run with `--log-level debug` |
+| "Need to inspect raw data?" | Use `--store file:<dir>` and browse files |
+
+### Environment Variables for Debugging
+
+```bash
+# Enable debug logging via env var
+MCP_TRUNC_PROXY_LOG_LEVEL=debug
+
+# Use file store for inspection
+MCP_TRUNC_PROXY_STORE=file:.mcp-debug-artifacts
+
+# Lower threshold to trigger more offloading (for testing)
+MCP_TRUNC_PROXY_MAX_BYTES=10000
+```
+
+---
+
 ## Security
 
 Tool outputs can contain secrets (tokens, env vars, credentials).

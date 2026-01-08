@@ -28,7 +28,9 @@ function parseArgs(argv) {
     store: process.env.MCP_TRUNC_PROXY_STORE || "memory",
     toolName: process.env.MCP_TRUNC_PROXY_TOOL_NAME || "proxy_artifact_get",
     infoToolName: process.env.MCP_TRUNC_PROXY_INFO_TOOL_NAME || "proxy_artifact_info",
+    listToolName: process.env.MCP_TRUNC_PROXY_LIST_TOOL_NAME || "proxy_artifact_list",
     exposeInfoTool: (process.env.MCP_TRUNC_PROXY_EXPOSE_INFO_TOOL || "true") !== "false",
+    exposeListTool: (process.env.MCP_TRUNC_PROXY_EXPOSE_LIST_TOOL || "true") !== "false",
     redisKeyPrefix: process.env.MCP_TRUNC_PROXY_REDIS_KEY_PREFIX || "mcp-trunc-proxy",
     logLevel: process.env.MCP_TRUNC_PROXY_LOG_LEVEL || "info",
     childCommand: null,
@@ -66,7 +68,9 @@ function parseArgs(argv) {
       case "--store": args.store = String(next); i += val ? 1 : 2; break;
       case "--tool-name": args.toolName = String(next); i += val ? 1 : 2; break;
       case "--info-tool-name": args.infoToolName = String(next); i += val ? 1 : 2; break;
+      case "--list-tool-name": args.listToolName = String(next); i += val ? 1 : 2; break;
       case "--no-info-tool": args.exposeInfoTool = false; i += 1; break;
+      case "--no-list-tool": args.exposeListTool = false; i += 1; break;
       case "--log-level": args.logLevel = String(next); i += val ? 1 : 2; break;
       case "--redis-key-prefix": args.redisKeyPrefix = String(next); i += val ? 1 : 2; break;
       default:
@@ -120,7 +124,9 @@ Options:
   --max-artifacts <n>       In-memory cap (default 2000)
   --tool-name <name>        Retriever tool name (default proxy_artifact_get)
   --info-tool-name <name>   Info tool name (default proxy_artifact_info)
+  --list-tool-name <name>   List tool name (default proxy_artifact_list)
   --no-info-tool            Disable info tool injection
+  --no-list-tool            Disable list tool injection
   --redis-key-prefix <p>    Redis key prefix (default mcp-trunc-proxy)
   --log-level <level>       silent|error|warn|info|debug (default info)
   -h, --help                Show this help

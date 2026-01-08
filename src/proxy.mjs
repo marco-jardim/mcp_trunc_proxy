@@ -128,7 +128,25 @@ export async function runProxy(config) {
       },
     };
 
-    return { getTool, infoTool };
+    const listTool = {
+      name: config.listToolName,
+      description: "List all artifacts currently stored in the proxy. Returns artifact IDs, tool names, sizes, and timestamps. Useful for debugging and inspecting stored data.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 100,
+            default: 20,
+            description: "Maximum number of artifacts to return (default: 20, max: 100).",
+          },
+        },
+        required: [],
+      },
+    };
+
+    return { getTool, infoTool, listTool };
   }
 
   function isFinalToolsListPage(result) {
@@ -143,7 +161,7 @@ export async function runProxy(config) {
     if (!Array.isArray(result.tools)) return result;
     if (!isFinalToolsListPage(result)) return result;
 
-    const { getTool, infoTool } = makeInjectedTools();
+    const { getTool, infoTool, listTool } = makeInjectedTools();
     const names = new Set(result.tools.map((t) => t?.name).filter(Boolean));
     if (names.has(getTool.name)) {
       log.warn(`tool name collision: downstream already has "${getTool.name}", proxy tool not injected. Use --tool-name to change.`);
@@ -155,6 +173,13 @@ export async function runProxy(config) {
         log.warn(`tool name collision: downstream already has "${infoTool.name}", proxy info tool not injected. Use --info-tool-name to change.`);
       } else {
         result.tools.push(infoTool);
+      }
+    }
+    if (config.exposeListTool) {
+      if (names.has(listTool.name)) {
+        log.warn(`tool name collision: downstream already has "${listTool.name}", proxy list tool not injected. Use --list-tool-name to change.`);
+      } else {
+        result.tools.push(listTool);
       }
     }
     return result;
@@ -399,6 +424,18 @@ export async function runProxy(config) {
       return makeJsonRpcResponse(id, { content: [{ type: "text", text: stableStringify(info) }], isError: false });
     }
 
+    if (config.exposeListTool && name === config.listToolName) {
+      const limit = clampInt(args.limit ?? 20, 1, 100);
+      const artifacts = await store.list();
+      const limited = artifacts.slice(0, limit);
+      const summary = {
+        total: artifacts.length,
+        returned: limited.length,
+        artifacts: limited,
+      };
+      return makeJsonRpcResponse(id, { content: [{ type: "text", text: stableStringify(summary) }], isError: false });
+    }
+
     // Not ours
     return null;
   }
@@ -451,7 +488,7 @@ export async function runProxy(config) {
       if (method === "tools/call") {
         const toolName = msg?.params?.name;
         // If it's our injected tool, handle locally
-        if (toolName === config.toolName || (config.exposeInfoTool && toolName === config.infoToolName)) {
+        if (toolName === config.toolName || (config.exposeInfoTool && toolName === config.infoToolName) || (config.exposeListTool && toolName === config.listToolName)) {
           const resp = await handleProxyToolCall(msg);
           if (resp) immediateResponses.push(resp);
           return { forward: null, immediateResponses };
