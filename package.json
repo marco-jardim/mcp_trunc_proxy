@@ -12,7 +12,7 @@
     "node": ">=18.0.0"
   },
   "optionalDependencies": {
-    "redis": "^4.7.0"
+    "redis": "^5.10.0"
   },
   "devDependencies": {
     "eslint": "^8.57.0",
