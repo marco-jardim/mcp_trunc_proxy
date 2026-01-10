@@ -1,6 +1,6 @@
 {
   "name": "mcp-trunc-proxy",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Generic MCP stdio proxy that offloads large tools/call results to an artifact store (memory by default) and returns small previews + retrieval tool.",
   "type": "module",
   "license": "GPL-3.0-only",
