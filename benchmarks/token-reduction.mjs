@@ -19,11 +19,11 @@ import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const CLI = join(ROOT, "src/cli.mjs");
-
 // Approximate tokens = chars / 4 (rough estimate for GPT-style tokenizers)
 const estimateTokens = (str) => Math.ceil(str.length / 4);
 const formatBytes = (b) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(2)} MB` : b > 1024 ? `${(b / 1024).toFixed(1)} KB` : `${b} B`;
@@ -178,6 +178,7 @@ const SCENARIOS = {
     lines.push(" Duration    12.34s");
     return lines.join("\n");
   },
+    const randomIdSegment = (bytes = 8) => randomBytes(bytes).toString("hex");
 
   // Database query results
   database_query_result: () => {
@@ -185,7 +186,7 @@ const SCENARIOS = {
     for (let i = 0; i < 1000; i++) {
       rows.push({
         id: i + 1,
-        uuid: `${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`,
+        uuid: `${randomIdSegment()}-${randomIdSegment()}`,
         name: `User ${i}`,
         email: `user${i}@example.com`,
         created_at: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString(),
